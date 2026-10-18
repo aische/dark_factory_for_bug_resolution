@@ -9,7 +9,7 @@ import {
 import { clone, commitAll, fetchBranchBack, git, gitOk } from '../git.js';
 import { judge } from '../llm.js';
 import type { Verdict } from '../log.js';
-import { runPytest, summarize } from '../pytest.js';
+import { summarize } from '../runtime.js';
 import { formatReport, type BugReport } from '../report.js';
 import type { FixerDiff } from './fix.js';
 import type { LockedTest } from './test.js';
@@ -113,10 +113,19 @@ export interface DiffCheckResult {
 
 const isTestPath = (p: string) => {
   const name = basename(p);
-  return p.startsWith('tests/') || /^test_.*\.py$/.test(name) || /_test\.py$/.test(name) || name === 'conftest.py';
+  return p.startsWith('tests/')
+    || /^test_.*\.py$/.test(name)
+    || /_test\.py$/.test(name)
+    || name === 'conftest.py'
+    || /\.(test|spec)\.[cm]?[jt]sx?$/.test(name);
 };
 
-const IMPORT = /^\+\s*(import\s|from\s+\S+\s+import\s)/;
+const isNewImport = (text: string) =>
+  /^\s*(import\s|from\s+\S+\s+import\s)/.test(text)
+  || text.includes('__import__(')
+  || text.includes('importlib')
+  || /^\s*const\s+\w+\s*=\s*require\s*\(/.test(text)
+  || /^\s*export\s+.+\s+from\s+/.test(text);
 
 /** Deterministic diff checks (C-POST-2). First failure wins. */
 export function checkDiff(input: DiffCheckInput): DiffCheckResult {
@@ -162,7 +171,7 @@ export function checkDiff(input: DiffCheckInput): DiffCheckResult {
   if (lines > policy.maxChangedLines) return result('size', `${lines} lines changed, max ${policy.maxChangedLines}`);
   if (p.hunks > policy.maxHunks) return result('size', `${p.hunks} hunks, max ${policy.maxHunks}`);
 
-  const imp = p.added.find((a) => IMPORT.test('+' + a.text) || a.text.includes('__import__(') || a.text.includes('importlib'));
+  const imp = p.added.find((a) => isNewImport(a.text));
   if (imp) return result('no new imports', `new import at ${imp.path}:${imp.line}`);
 
   const patterns = policy.secretPatterns.map((s) => ({ s, re: new RegExp(s, 'i') }));
@@ -199,13 +208,13 @@ export async function testsIn(
 ): Promise<{ stop?: Stop; reason: string }> {
   const runs = ctx.policy.test.runs;
   const junit = (name: string) => join(issueDir(ctx, n), 'junit', `${tag}-${name}.xml`);
-  const base = { cwd, venvDir: ctx.venvDir, timeoutSec: ctx.policy.tests.timeoutSec };
+  const base = { cwd, envDir: ctx.envDir, timeoutSec: ctx.policy.tests.timeoutSec };
   const evidence: Record<string, unknown>[] = [];
   let green = 0;
   let verdict: Verdict = 'pass';
   let reason = '';
   for (let i = 1; i <= runs; i++) {
-    const r = await runPytest({ ...base, junitPath: junit(`repro-${i}`), args: [test.path] });
+    const r = await ctx.runtime.runTests({ ...base, junitPath: junit(`repro-${i}`), args: [test.path] });
     evidence.push({ run: i, ...summarize(r) });
     if (r.timedOut) { verdict = 'unknown'; reason = 'repro test timed out'; break; }
     if (r.exitCode === 0 && r.cases.length > 0 && r.cases.every((c) => c.outcome === 'passed')) green++;
@@ -215,7 +224,7 @@ export async function testsIn(
     reason = `repro ${green}/${runs} green`;
   }
   if (verdict === 'pass') {
-    const suite = await runPytest({ ...base, junitPath: junit('suite') });
+    const suite = await ctx.runtime.runTests({ ...base, junitPath: junit('suite') });
     evidence.push({ suite: true, ...summarize(suite) });
     if (suite.timedOut) { verdict = 'unknown'; reason = 'suite timed out'; }
     else if (suite.exitCode !== 0) {
@@ -244,6 +253,7 @@ export async function postStep(
   const branch = branchName(n);
   const dir = join(issueDir(ctx, n), 'verify');
   await clone(ctx.repoDir, dir, branch);
+  ctx.runtime.prepareCheckout(ctx.envDir, dir);
 
   const check = await git(dir, ['apply', '--check', fix.patchPath]);
   const applyStop = check.exitCode === 0

@@ -1,8 +1,12 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { normaliseRepo } from '../src/config.js';
 import { parseJson } from '../src/llm.js';
-import { parseJunit } from '../src/pytest.js';
-import { firstPythonBlock } from '../src/steps/test.js';
+import { detectLanguage } from '../src/runtime.js';
+import { parseJunit } from '../src/suite.js';
+import { firstCodeBlock, firstPythonBlock } from '../src/steps/test.js';
 
 describe('parseJunit', () => {
   it('reads outcomes and failure text', () => {
@@ -35,6 +39,26 @@ describe('parseJson', () => {
 it('firstPythonBlock takes the first python block', () => {
   expect(firstPythonBlock('x\n```python\ndef test_a():\n    assert 1\n```\n```python\nother\n```')).toBe('def test_a():\n    assert 1\n');
   expect(firstPythonBlock('```\nno lang\n```')).toBeNull();
+});
+
+it('firstCodeBlock accepts typescript fences', () => {
+  expect(firstCodeBlock('```typescript\nexpect(1).toBe(2)\n```', 'typescript')).toBe('expect(1).toBe(2)\n');
+  expect(firstCodeBlock('```ts\nconst x = 1\n```', 'typescript')).toBe('const x = 1\n');
+  expect(firstCodeBlock('```python\nx\n```', 'typescript')).toBeNull();
+});
+
+it('detectLanguage prefers typescript when package.json has vitest', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'factory-lang-'));
+  try {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({
+      devDependencies: { vitest: '2.0.0', typescript: '5.0.0' },
+    }));
+    expect(detectLanguage(dir)).toBe('typescript');
+    writeFileSync(join(dir, 'requirements.txt'), 'pytest\n');
+    expect(detectLanguage(dir)).toBe('typescript');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 it('normaliseRepo accepts names and URLs', () => {

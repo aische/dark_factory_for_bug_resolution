@@ -44,7 +44,8 @@ export async function fixStep(ctx: RunContext, r: BugReport, test: LockedTest): 
   await clone(ctx.repoDir, ws, branchName(n));
   if ((await head(ws)) !== test.R) throw new FactoryError(`fixer workspace is not at ${test.R}`);
 
-  const testCommand = `${join(ctx.venvDir, 'bin', 'python')} -m pytest ${test.path} -q`;
+  ctx.runtime.prepareCheckout(ctx.envDir, ws);
+  const testCommand = ctx.runtime.testCommand(ctx.envDir, ws, test.path);
   const prompt = fixerPrompt(r, test.path, testCommand);
   const provider = ctx.fixerProvider;
   const timeoutSec = ctx.policy.fixer.timeoutSec;
@@ -52,7 +53,7 @@ export async function fixStep(ctx: RunContext, r: BugReport, test: LockedTest): 
 
   // Only what the fixer needs; never GitHub tokens or other providers' keys (R-FIX-7).
   const env: Record<string, string> = {
-    PATH: `${join(ctx.venvDir, 'bin')}:${process.env.PATH ?? ''}`,
+    PATH: `${ctx.runtime.pathPrefix(ctx.envDir, ws)}:${process.env.PATH ?? ''}`,
     HOME: process.env.HOME ?? '',
     LANG: process.env.LANG ?? 'en_US.UTF-8',
     TERM: 'dumb',

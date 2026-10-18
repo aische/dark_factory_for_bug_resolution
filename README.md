@@ -32,7 +32,7 @@ Handed to a human:
 For each candidate issue, oldest first:
 
 1. **Find.** The form checks parse the issue body. They need a component, a description, an input (a JSON object), and an expected and an actual value (JSON scalars that differ). An LLM then judges whether the bug is small and local.
-2. **Reproducing test.** An LLM writes one pytest test, which is committed to `factory/issue-<n>` as `tests/repro/test_issue_<n>.py`. The test must fail on the base commit 3 out of 3 times, on an assertion, and contain the reported input, expected and actual values. An LLM judge then reviews how it is written. The file's hash is locked and the branch is pushed.
+2. **Reproducing test.** An LLM writes one reproducing test for the target language (pytest for Python, Vitest for TypeScript), committed on `factory/issue-<n>`. The test must fail on the base commit 3 out of 3 times, on an assertion, and contain the reported input, expected and actual values. An LLM judge then reviews how it is written. The file's hash is locked and the branch is pushed.
 3. **Fixer.** The fixer runs on a fresh clone of the branch. It gets a minimal environment: no GitHub token and no other provider's key. Only its `git diff` is taken.
 4. **Post-check.** The diff is applied and committed, then checked. It must not touch tests, and the test hash must be unchanged. It must stay out of protected paths and inside `src/**`. It may not create, delete or rename files, or change binary files or modes. It has a size limit, and it may not add imports or secrets. Then the repro test must pass 3 out of 3 times and the full suite once. An LLM judge reviews the fix.
 5. **Merge.** `main` is fast-forwarded to the branch, never force-pushed. If `main` moved during the run, the branch is rebased and all checks run again. The issue is then commented, labelled `factory:resolved` and closed.
@@ -178,7 +178,14 @@ An order of exactly 50.00 to Germany should ship free.
 
 The factory skips issues that already carry `factory:in-progress`, `factory:resolved` or `factory:needs-human`. To retry an issue after a human has looked at it, remove `factory:needs-human`.
 
-The target repo needs the tests to be green on the base commit, test code in `tests/`, application code in `src/`, and a pytest config that puts `src` on the path (`pythonpath = ["src"]`). Dependencies come from `requirements.txt` and `requirements-dev.txt`, if present. If neither installs pytest, the factory installs it.
+The target repo needs a green suite on the base commit and application code under `src/`. Language is chosen by `tests.language` in the policy (`auto` by default):
+
+| Language | How it is detected (`auto`) | Install | Runner | Repro test path |
+|---|---|---|---|---|
+| Python | no JS/TS package markers | venv + `requirements*.txt` (pytest installed if missing) | pytest | `tests/repro/test_issue_<n>.py` |
+| TypeScript | `package.json` with vitest/typescript/jest | `npm ci` / `npm install` | Vitest (must be a dependency) | `tests/repro/issue_<n>.test.ts` |
+
+Python targets need a pytest config that puts `src` on the path (`pythonpath = ["src"]`). TypeScript targets should already run with `vitest run` (colocated `*.test.ts` under `src/` is fine for existing tests).
 
 ## Configuration
 
@@ -191,7 +198,7 @@ The target repo needs the tests to be green on the base commit, test code in `te
 | `triage.componentDenylist` | Components that always go to a human. |
 | `test.dir`, `test.runs` | Where repro tests go, and how often each test run is repeated. |
 | `diff.*` | Allowed and protected paths, size limits and secret patterns for the diff checks. |
-| `tests.python`, `tests.timeoutSec` | The Python used to create the venv, and the pytest timeout. |
+| `tests.language`, `tests.python`, `tests.timeoutSec` | Target language (`auto` \| `python` \| `typescript`), the Python used for venvs, and the suite timeout. |
 | `git.authorName`, `git.authorEmail` | Identity for the factory's commits. |
 
 Fixers and their providers:
@@ -211,8 +218,9 @@ Each run writes to `.factory/runs/<runId>/` (gitignored):
 ```
 log.jsonl              evidence log: every check, judge prompt and answer, push and GitHub write
 repo/                  clone of the target repo; all pushes go from here
-venv/                  Python environment for the tests
+venv/                  Python environment (Python targets)
 junit/                 base suite report
+                       TypeScript targets install into repo/node_modules instead
 issue-<n>/
   test/ fixer/ verify/ the working copies for each step
   fixer.log            the fixer's stdout and stderr
@@ -239,10 +247,11 @@ src/
   exec.ts           subprocesses with timeout and process-group kill
   git.ts            clone, commit, rebase
   github.ts         gh and push wrappers (dry-run aware)
-  pytest.ts         pytest runner and JUnit parser
+  suite.ts          JUnit parser shared by test runners
+  runtime.ts        Python (pytest) and TypeScript (Vitest) target adapters
   llm.ts            OpenAI-compatible client, JSON answers, judges
   report.ts         issue form parser
-  literals.ts       Python literal matching
+  literals.ts       Python/JS literal matching
   steps/            find, test, fix, post, merge
   fixers/           omp, claude, rogue-edit-test
 test/               unit tests
@@ -253,4 +262,5 @@ test/               unit tests
 - **No sandbox.** The fixer runs as your user and can read what you can read, including `gh` credentials under `HOME`. Only its diff is used.
 - **One attempt per issue.** A fixer that is merely unlucky sends a trivial bug to a human.
 - **Judges can miss things.** A fixer can special-case the test's exact input; only the fix judge looks for that.
-- **Simple checks.** The import check is line-based and Python-specific. The secret check is a short list of patterns.
+- **Simple checks.** The import check is line-based (Python and TypeScript). The secret check is a short list of patterns.
+- **TypeScript means Vitest.** Jest is not a separate runner yet; a repo without vitest is rejected at setup.

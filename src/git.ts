@@ -8,7 +8,7 @@ export interface Identity {
   authorEmail: string;
 }
 
-const EXCLUDES = ['.omp/', '.claude/', '__pycache__/', '.pytest_cache/', '*.pyc'];
+const EXCLUDES = ['.omp/', '.claude/', '__pycache__/', '.pytest_cache/', '*.pyc', 'node_modules/'];
 
 export const git = (cwd: string, args: string[]): Promise<RunResult> => run('git', args, { cwd });
 export const gitOk = (cwd: string, args: string[]): Promise<string> => runOk('git', args, { cwd });

@@ -98,7 +98,7 @@ With `--jsonl`, stdout carries only events: each log entry (C-LOG-1) as one JSON
 
 1. Run id `YYYYMMDD-HHMMSS-<4 hex>`. All files go under `.factory/runs/<runId>/` (gitignored).
 2. `git clone https://github.com/<repo>.git .factory/runs/<runId>/repo`. Resolve the default branch name and the base sha; check out the base sha detached.
-3. Create a venv in `.factory/runs/<runId>/venv` and install `requirements.txt` / `requirements-dev.txt` if present. Every test run uses `<venv>/bin/python -m pytest`. The target package is not installed; the target repo's pytest config puts `src` on the path (C-TGT-3), so each checkout tests its own code.
+3. Resolve the target language from `tests.language` (`auto` detects TypeScript from `package.json` with vitest/typescript/jest, otherwise Python). **Python:** create a venv in `.factory/runs/<runId>/venv` and install `requirements.txt` / `requirements-dev.txt` if present; every test run uses `<venv>/bin/python -m pytest`. **TypeScript:** `npm ci` (or `npm install`) in the clone; every test run uses the local Vitest with a JUnit reporter. Working copies symlink `node_modules` from the main clone.
 4. Create the labels `factory`, `factory:in-progress`, `factory:resolved`, `factory:needs-human` with `gh label create --force`.
 5. Run the full suite on the base. If it is not green, nothing later can be trusted: exit 1 without touching any issue (R-PRE-7).
 
@@ -366,7 +366,7 @@ One helper runs pytest with `-q -p no:cacheprovider --junitxml=<issue dir>/junit
       "(password|passwd|secret|api_?key|token)\\w*\\s*[:=]\\s*[\"'][^\"']{8,}[\"']"
     ]
   },
-  "tests": { "python": "python3", "timeoutSec": 120 },
+  "tests": { "language": "auto", "python": "python3", "timeoutSec": 120 },
   "git": { "authorName": "Dark Factory", "authorEmail": "factory@localhost" }
 }
 ```

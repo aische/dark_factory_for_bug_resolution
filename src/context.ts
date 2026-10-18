@@ -4,13 +4,16 @@ import type { Fixer } from './fixers/index.js';
 import type { GitHub } from './github.js';
 import type { Llm } from './llm.js';
 import type { EvidenceLog, Verdict } from './log.js';
+import type { TargetRuntime } from './runtime.js';
 
 export interface RunContext {
   runId: string;
   runDir: string;
   /** Clone of the GitHub repo; the only place pushes go from. */
   repoDir: string;
-  venvDir: string;
+  /** Shared test environment: Python venv, or the main clone (with node_modules) for TypeScript. */
+  envDir: string;
+  runtime: TargetRuntime;
   repo: string;
   baseSha: string;
   defaultBranch: string;
@@ -66,4 +69,4 @@ export function record(
 
 export const branchName = (n: number) => `factory/issue-${n}`;
 export const issueDir = (ctx: RunContext, n: number) => join(ctx.runDir, `issue-${n}`);
-export const testPath = (ctx: RunContext, n: number) => `${ctx.policy.test.dir}/test_issue_${n}.py`;
+export const testPath = (ctx: RunContext, n: number) => ctx.runtime.reproPath(ctx.policy.test.dir, n);

@@ -46,7 +46,12 @@ export const PolicySchema = z.object({
       z.string().refine(compiles, { message: 'does not compile as a JavaScript regex' }),
     ),
   }),
-  tests: z.object({ python: z.string().min(1), timeoutSec: z.number().positive() }),
+  tests: z.object({
+    /** Target language. `auto` picks typescript when package.json looks like a JS/TS app, else python. */
+    language: z.enum(['auto', 'python', 'typescript']).default('auto'),
+    python: z.string().min(1).default('python3'),
+    timeoutSec: z.number().positive(),
+  }),
   git: z.object({ authorName: z.string().min(1), authorEmail: z.string().min(1) }),
 });
 

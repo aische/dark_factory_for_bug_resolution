@@ -55,6 +55,8 @@ describe('checkDiff', () => {
     expect(r).toMatchObject({ verdict: 'fail', check: 'tests untouched' });
     expect(checkDiff(input(edit('src/conftest.py', ['y = 2']))).check).toBe('tests untouched');
     expect(checkDiff(input(edit('src/test_x.py', ['y = 2']))).check).toBe('tests untouched');
+    expect(checkDiff(input(edit('src/cart.test.ts', ['expect(1).toBe(1)']))).check).toBe('tests untouched');
+    expect(checkDiff(input(edit('tests/repro/issue_2.test.ts', ['expect(1).toBe(1)']))).check).toBe('tests untouched');
   });
 
   it('checks the locked hash', () => {
@@ -108,6 +110,8 @@ new mode 100755
       expect(checkDiff(input(edit('src/a.py', [line]))).check).toBe('no new imports');
     }
     expect(checkDiff(input(edit('src/a.py', ['important = 1']))).verdict).toBe('pass');
+    expect(checkDiff(input(edit('src/a.ts', ['import { x } from "./x.js"']))).check).toBe('no new imports');
+    expect(checkDiff(input(edit('src/a.ts', ['export { x } from "./x.js"']))).check).toBe('no new imports');
   });
 
   it('rejects secrets without logging them', () => {

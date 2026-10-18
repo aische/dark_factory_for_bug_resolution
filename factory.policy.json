@@ -24,6 +24,8 @@
     "allowedPaths": ["src/**"],
     "protectedPaths": [
       "tests/**", "**/conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini",
+      "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "tsconfig*.json",
+      "vitest.config.*", "vite.config.*", "jest.config.*",
       ".github/**", "config/**", "requirements*.txt", "*.lock", "Dockerfile", ".env*",
       "factory.policy.json"
     ],
@@ -40,6 +42,6 @@
       "(password|passwd|secret|api_?key|token)\\w*\\s*[:=]\\s*[\"'][^\"']{8,}[\"']"
     ]
   },
-  "tests": { "python": "python3", "timeoutSec": 120 },
+  "tests": { "language": "auto", "python": "python3", "timeoutSec": 120 },
   "git": { "authorName": "Dark Factory", "authorEmail": "factory@localhost" }
 }

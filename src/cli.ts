@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --env-file-if-exists=.env
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import { loadPolicy, normaliseRepo, resolveProvider } from './config.js';
@@ -12,7 +12,7 @@ import { addExcludes, defaultBranch, gitOk, revParse } from './git.js';
 import { GitHub, LABELS, type GhIssue } from './github.js';
 import { Llm } from './llm.js';
 import { EvidenceLog } from './log.js';
-import { runPytest, summarize } from './pytest.js';
+import { resolveRuntime, summarize } from './runtime.js';
 import { findStep } from './steps/find.js';
 import { fixStep } from './steps/fix.js';
 import { handToHuman, mergeStep, resolveIssue } from './steps/merge.js';
@@ -76,32 +76,31 @@ async function setup(opts: RunOptions): Promise<RunContext> {
   if (!baseSha) throw new UsageError(`unknown sha ${opts.sha ?? `origin/${branch}`} in ${repo}`);
   await gitOk(repoDir, ['checkout', '--quiet', '--detach', baseSha]);
   log.baseSha = baseSha;
+  const runtime = resolveRuntime(policy, repoDir);
   log.write({
     step: 'setup',
-    reason: `${repo} base ${baseSha.slice(0, 7)} on ${branch}, fixer ${fixer.name} (${fixerProvider.name}/${fixerProvider.model}), llm ${llmProvider.name}/${llmProvider.model}`,
+    reason: `${repo} base ${baseSha.slice(0, 7)} on ${branch}, language ${runtime.language}, fixer ${fixer.name} (${fixerProvider.name}/${fixerProvider.model}), llm ${llmProvider.name}/${llmProvider.model}`,
     evidence: {
-      runDir, baseSha, defaultBranch: branch, fixer: fixer.name,
+      runDir, baseSha, defaultBranch: branch, language: runtime.language, fixer: fixer.name,
       fixerProvider: fixerProvider.name, fixerModel: fixerProvider.model,
       llmProvider: llmProvider.name, llmModel: llmProvider.model, dryRun: !!opts.dryRun,
     },
   });
 
-  const venvDir = join(runDir, 'venv');
-  const python = join(venvDir, 'bin', 'python');
-  await runOk(policy.tests.python, ['-m', 'venv', venvDir]);
-  const reqs = ['requirements.txt', 'requirements-dev.txt'].filter((f) => existsSync(join(repoDir, f)));
-  for (const f of reqs) {
-    await runOk(python, ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-r', f], { cwd: repoDir });
-  }
-  if ((await run(python, ['-c', 'import pytest'])).exitCode !== 0) {
-    await runOk(python, ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', 'pytest']);
-  }
-  log.write({ step: 'setup', check: 'venv', reason: `venv with ${reqs.join(', ') || 'pytest only'}`, evidence: { venvDir, requirements: reqs } });
-
-  const suite = await runPytest({
-    cwd: repoDir, venvDir, junitPath: join(runDir, 'junit', 'base-suite.xml'), timeoutSec: policy.tests.timeoutSec,
+  const installed = await runtime.setup(repoDir, runDir, policy);
+  log.write({
+    step: 'setup', check: 'env',
+    reason: `${runtime.language}: ${installed.reason}`,
+    evidence: installed.evidence,
   });
-  const green = suite.exitCode === 0 && !suite.timedOut;
+
+  const suite = await runtime.runTests({
+    cwd: repoDir,
+    envDir: installed.envDir,
+    junitPath: join(runDir, 'junit', 'base-suite.xml'),
+    timeoutSec: policy.tests.timeoutSec,
+  });
+  const green = suite.exitCode === 0 && !suite.timedOut && suite.cases.length > 0;
   log.write({
     step: 'setup', check: 'suite', verdict: green ? 'pass' : 'fail',
     reason: green ? `${suite.cases.length} tests green on base` : 'suite is not green on base',
@@ -110,7 +109,7 @@ async function setup(opts: RunOptions): Promise<RunContext> {
   if (!green) throw new FactoryError('suite is not green on base; not touching any issue');
 
   return {
-    runId, runDir, repoDir, venvDir, repo, baseSha, defaultBranch: branch, policy,
+    runId, runDir, repoDir, envDir: installed.envDir, runtime, repo, baseSha, defaultBranch: branch, policy,
     llm: new Llm(llmProvider, policy.llm.temperature, policy.llm.timeoutSec),
     fixer, fixerProvider, secrets, log, gh,
   };
