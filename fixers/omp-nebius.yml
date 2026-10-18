@@ -1,0 +1,10 @@
+# OMP overlay (omp --config) that adds Nebius Token Factory as an
+# OpenAI-compatible provider. The API key is passed with --api-key.
+# NOT VERIFIED against the OMP docs yet: check the overlay format and the
+# model id before the first Nebius run.
+providers:
+  nebius:
+    baseUrl: https://api.tokenfactory.nebius.com/v1/
+    api: openai-completions
+    models:
+      - id: deepseek-ai/DeepSeek-R1-0528

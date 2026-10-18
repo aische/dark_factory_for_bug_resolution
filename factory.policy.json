@@ -1,0 +1,45 @@
+{
+  "llm": {
+    "provider": "deepseek",
+    "providers": {
+      "deepseek": {
+        "baseURL": "https://api.deepseek.com",
+        "anthropicBaseURL": "https://api.deepseek.com/anthropic",
+        "apiKeyEnv": "DEEPSEEK_API_KEY",
+        "model": "deepseek-v4-pro"
+      },
+      "nebius": {
+        "baseURL": "https://api.tokenfactory.nebius.com/v1/",
+        "apiKeyEnv": "NEBIUS_API_KEY",
+        "model": "deepseek-ai/DeepSeek-R1-0528"
+      }
+    },
+    "timeoutSec": 120,
+    "temperature": 0
+  },
+  "fixer": { "name": "omp", "provider": null, "model": null, "timeoutSec": 600 },
+  "triage": { "componentDenylist": [] },
+  "test": { "dir": "tests/repro", "runs": 3 },
+  "diff": {
+    "allowedPaths": ["src/**"],
+    "protectedPaths": [
+      "tests/**", "**/conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini",
+      ".github/**", "config/**", "requirements*.txt", "*.lock", "Dockerfile", ".env*",
+      "factory.policy.json"
+    ],
+    "maxFiles": 2,
+    "maxChangedLines": 20,
+    "maxHunks": 3,
+    "secretPatterns": [
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "\\bAKIA[0-9A-Z]{16}\\b",
+      "\\bgh[pousr]_[A-Za-z0-9]{36}\\b",
+      "\\bgithub_pat_[A-Za-z0-9_]{22,}",
+      "\\bsk-[A-Za-z0-9_-]{20,}",
+      "\\bxox[abprs]-[A-Za-z0-9-]{10,}",
+      "(password|passwd|secret|api_?key|token)\\w*\\s*[:=]\\s*[\"'][^\"']{8,}[\"']"
+    ]
+  },
+  "tests": { "python": "python3", "timeoutSec": 120 },
+  "git": { "authorName": "Dark Factory", "authorEmail": "factory@localhost" }
+}
