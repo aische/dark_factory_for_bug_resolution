@@ -42,7 +42,7 @@ Every stage checks the pause switch before it starts and writes its result plus 
 
 ```mermaid
 flowchart TD
-    BR[/"Bug report<br/>structured template"/] --> IN
+    BR[/"GitHub issue<br/>issue form · factory label"/] --> IN
 
     subgraph PRE["Pre-checks"]
         IN["Intake filter<br/>required fields · component denylist<br/>optional LLM veto"]
@@ -110,9 +110,10 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 
 ### Bug reports (R-IN)
 
-- **R-IN-1** Input is one bug report per record, in a structured template: id, title, component, description, input or steps, expected result, actual result.
+- **R-IN-1** Input is a GitHub issue in the target repo, created from an issue form with these fields: component, description, input or steps, expected result, actual result. The form adds the `factory` label. The pipeline parses the form's sections deterministically; an issue it cannot parse is Unknown.
 - **R-IN-2** Input, expected result and actual result are stated as concrete values. The check that the test matches the report (R-PRE-8) depends on this.
-- **R-IN-3** Bugs are processed one at a time, in order. A bug already resolved or in progress is skipped.
+- **R-IN-3** Open issues labeled `factory` are processed one at a time, oldest first. Issues labeled `factory:in-progress`, `factory:resolved` or `factory:needs-human` are skipped.
+- **R-IN-4** The pipeline reports back on the issue. It sets `factory:in-progress` when it starts. On success it comments with the commit and run id, sets `factory:resolved` and closes the issue.
 
 ### Pre-checks (R-PRE)
 
@@ -155,7 +156,7 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 - **R-FIX-4** Retries. The fixer gets up to K attempts per bug (K = 2, *policy*). A diff that fails a post-check triggers a new attempt in a fresh workspace, and the fixer receives the previous attempt's verdict and reason. Every attempt goes through all post-checks. Unknown verdicts, timeouts and crashes escalate at once (P3). When attempts run out, the bug escalates.
 - **R-FIX-5** At least one off-the-shelf coding agent is plugged in, using Nebius Token Factory models.
 - **R-FIX-6** Fixers are selected by configuration, with no change to pipeline code.
-- **R-FIX-7** The factory's signing key and policy file are never present in the fixer workspace.
+- **R-FIX-7** The factory's signing key, policy file and GitHub token are never present in the fixer workspace or environment. The fixer receives only its own LLM API key.
 
 ### Post-checks: diff inspection (R-DIFF)
 
@@ -193,7 +194,7 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 ### Escalation (R-ESC)
 
 - **R-ESC-1** An escalation records the bug id, run id, stage, verdict, reason and a pointer to the evidence.
-- **R-ESC-2** Escalations go to a queue shown in the live view. Posting to an issue tracker or a webhook is optional.
+- **R-ESC-2** An escalation comments on the GitHub issue with the stage, reason and run id, sets `factory:needs-human` and leaves the issue open. It also appears in the live view.
 - **R-ESC-3** An escalated bug is not retried automatically.
 
 ### Human on the loop (R-HUM)
@@ -220,7 +221,7 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 
 ### Non-functional (R-NF)
 
-- **R-NF-1** Runs on a laptop. The only external dependency is the Nebius Token Factory API.
+- **R-NF-1** Runs on a laptop. The only external dependencies are the Nebius Token Factory API and GitHub.
 - **R-NF-2** The full demo (6 bugs plus rogue fixer runs) completes within 30 minutes.
 
 ## Demo and acceptance
@@ -251,13 +252,13 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
 
 ## Open decisions
 
-1. Team size and time budget.
-2. Target repo: a toy service we write ourselves (recommended, controllable) or a real open-source repo.
-3. Bug source: local structured files (recommended) or GitHub issues.
-4. Fixer: Aider or mini-swe-agent, and which Nebius model.
-5. Production: local processes (recommended) or a Nebius VM.
-6. Whether to include the LLM vetoes (R-PRE-2, R-PRE-9, R-DIFF-9) in the first build.
-7. Runtime sandbox as a stretch goal.
+Decided: 3 developers, 4 hours. Bug source is GitHub issues.
+
+1. Target repo: a toy service we write ourselves (recommended, controllable) or a real open-source repo.
+2. Fixer: Aider or mini-swe-agent, and which Nebius model.
+3. Production: local processes (recommended) or a Nebius VM.
+4. Whether to include the LLM vetoes (R-PRE-2, R-PRE-9, R-DIFF-9) in the first build.
+5. Runtime sandbox as a stretch goal.
 
 ## Later
 
