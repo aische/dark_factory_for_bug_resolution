@@ -24,8 +24,8 @@ This is the cut-down build of [Dark Factory for Bug Resolution — Requirements]
 
 - Deploy, canary, feature flag, observer, usage simulator, rollback (R-DEP and everything in target-repo.md beyond the repo and its issues). "Shipped" means merged to `main`.
 - Retries. Every issue gets one test and one fix attempt.
-- Secret scanner, syntax-tree import check, changed-line coverage (R-DIFF-7, R-DIFF-8, R-OR-3).
-- Signed audit log, verify, replay, pause, live view (R-AUD-2, R-AUD-5, R-AUD-6, R-HUM).
+- Syntax-tree import check, changed-line coverage (R-DIFF-8, R-OR-3). Secrets (R-DIFF-7) are checked with a short pattern list, not a full scanner.
+- Signed audit log, verify, replay, pause, live view (R-AUD-2, R-AUD-5, R-AUD-6, R-HUM). The nearest thing to a live view is `--jsonl` (C-CLI-3).
 - Runtime sandbox for the fixer.
 
 ## How judging works
@@ -63,7 +63,7 @@ flowchart TD
 ```
 factory run --repo <owner/name | github url> [--sha <sha>]
             [--fixer omp|claude|rogue-edit-test] [--provider deepseek|nebius]
-            [--issue <number>] [--dry-run] [--policy <path>]
+            [--issue <number>] [--dry-run] [--jsonl] [--policy <path>]
 ```
 
 - `--repo` (required): normalised to `owner/name`.
@@ -71,6 +71,7 @@ factory run --repo <owner/name | github url> [--sha <sha>]
 - `--fixer`, `--provider`: override the policy (C-CFG-1).
 - `--issue`: process only this issue. For the rogue demo and debugging.
 - `--dry-run`: no GitHub writes and no pushes; print them instead.
+- `--jsonl`: print events as JSON lines instead of text (C-CLI-3).
 - `--policy`: defaults to `factory.policy.json` in the current directory.
 
 ### C-CLI-2 Exit codes
@@ -85,6 +86,8 @@ factory run --repo <owner/name | github url> [--sha <sha>]
 ### C-CLI-3 Console output
 
 One line per check, for example `#12  test.checks  FAIL  test passed on base in 3/3 runs`. At the end, the merged issue and commit URL, or the list of issues handed to a human.
+
+With `--jsonl`, stdout carries only events: each log entry (C-LOG-1) as one JSON line, written when it is logged, so another process can follow the run. The end-of-run summary is a last entry with `"step": "run"`.
 
 ### C-CLI-4 Environment
 
@@ -236,6 +239,7 @@ From `git apply --numstat --summary` on the patch, the patch text, and the files
 5. **File operations:** no binary files, creates, deletes, renames, mode changes or symlinks.
 6. **Size:** at most 2 files, 20 changed lines, 3 hunks.
 7. **No new imports:** no added line matching `^\+\s*(import\s|from\s+\S+\s+import\s)` or containing `__import__(` or `importlib`.
+8. **No secrets:** no added line matches a pattern in `diff.secretPatterns` (compiled case-insensitive) or contains the value of an API key the factory loaded (C-CLI-4) (R-DIFF-7). The reason gives the path, line number, and the pattern or env var name. The matched text is never logged.
 
 ### C-POST-3 Tests (deterministic)
 
@@ -317,7 +321,7 @@ One helper runs pytest with `-q -p no:cacheprovider --junitxml=<issue dir>/junit
 
 ### C-CFG-1 Policy file
 
-`factory.policy.json`, validated with zod at startup. Its sha256 goes into every log entry.
+`factory.policy.json`, validated with zod at startup; every `diff.secretPatterns` entry must compile as a JavaScript regex. Its sha256 goes into every log entry.
 
 ```json
 {
@@ -351,7 +355,16 @@ One helper runs pytest with `-q -p no:cacheprovider --junitxml=<issue dir>/junit
     ],
     "maxFiles": 2,
     "maxChangedLines": 20,
-    "maxHunks": 3
+    "maxHunks": 3,
+    "secretPatterns": [
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+      "\\bAKIA[0-9A-Z]{16}\\b",
+      "\\bgh[pousr]_[A-Za-z0-9]{36}\\b",
+      "\\bgithub_pat_[A-Za-z0-9_]{22,}",
+      "\\bsk-[A-Za-z0-9_-]{20,}",
+      "\\bxox[abprs]-[A-Za-z0-9-]{10,}",
+      "(password|passwd|secret|api_?key|token)\\w*\\s*[:=]\\s*[\"'][^\"']{8,}[\"']"
+    ]
   },
   "tests": { "python": "python3", "timeoutSec": 120 },
   "git": { "authorName": "Dark Factory", "authorEmail": "factory@localhost" }
@@ -543,3 +556,4 @@ Each step ends with something you can run.
 - N3 depends on the fix judge if the fixer hardcodes the country in code. An LLM judge can miss it; rehearse.
 - A fixer can special-case the test's exact input; only the fix judge looks for that.
 - The import check is line-based and Python-specific.
+- The secret check is a pattern list. It misses secrets in other formats, and a non-secret that matches sends the fix to a human.
