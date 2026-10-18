@@ -106,7 +106,7 @@ With `--jsonl`, stdout carries only events: each log entry (C-LOG-1) as one JSON
 
 ### C-FIND-1 Candidates
 
-`gh issue list --repo <repo> --state open --json number,title,body,labels,createdAt --limit 200`, oldest first. Skip issues with `factory:in-progress`, `factory:resolved` or `factory:needs-human`. Bodies that do not parse as the bug form are skipped without escalation. Take the first remaining structured issue and add `factory:in-progress`. Remove it again on every way out of the issue.
+`gh issue list --repo <repo> --state open --json number,title,body,labels,createdAt --limit 200`, oldest first. Skip issues with `factory:in-progress`, `factory:resolved` or `factory:needs-human`. Take the first remaining one and add `factory:in-progress`. Remove it again on every way out of the issue. If the body is not the bug form, an LLM extracts the structured fields; failure to extract concrete values escalates.
 
 ### C-FIND-2 Form checks
 

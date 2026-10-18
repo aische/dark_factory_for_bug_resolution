@@ -117,8 +117,7 @@ async function setup(opts: RunOptions): Promise<RunContext> {
 
 type IssueOutcome =
   | { merged: true; issue: number; commitUrl: string }
-  | { merged: false; issue: number; stop: Stop }
-  | { skipped: true; issue: number; reason: string };
+  | { merged: false; issue: number; stop: Stop };
 
 /** Steps 2–6 for one issue. Escalations are handled here; factory errors propagate. */
 async function processIssue(ctx: RunContext, issue: GhIssue): Promise<IssueOutcome> {
@@ -133,14 +132,6 @@ async function processIssue(ctx: RunContext, issue: GhIssue): Promise<IssueOutco
   };
   try {
     const found = await findStep(ctx, issue);
-    if ('skip' in found) {
-      ctx.log.write({
-        issue: n, step: 'find', check: 'skip',
-        reason: `not a factory bug report: ${found.reason}`,
-        evidence: { reason: found.reason },
-      });
-      return { skipped: true, issue: n, reason: found.reason };
-    }
     if (!found.ok) return await toHuman(found.stop);
     const report = found.value.report;
 
@@ -188,20 +179,14 @@ async function runFactory(opts: RunOptions): Promise<number> {
   if (candidates.length > 0) await ctx.gh.ensureLabels();
 
   const toHuman: Extract<IssueOutcome, { merged: false }>[] = [];
-  let skipped = 0;
   for (const issue of candidates) {
     const outcome = await processIssue(ctx, issue);
-    if ('skipped' in outcome) {
-      skipped++;
-      continue;
-    }
     if (outcome.merged) {
       ctx.log.write({
         step: 'run', reason: `merged #${outcome.issue}`,
         evidence: {
           merged: { issue: outcome.issue, commitUrl: outcome.commitUrl },
           needsHuman: toHuman.map(summaryOf),
-          skipped,
         },
       });
       ctx.log.say(`\nMerged #${outcome.issue}: ${outcome.commitUrl}`);
@@ -210,19 +195,12 @@ async function runFactory(opts: RunOptions): Promise<number> {
     }
     toHuman.push(outcome);
   }
-  const tried = candidates.length - skipped;
   ctx.log.write({
     step: 'run',
-    reason: !candidates.length ? 'no open issues to process'
-      : !tried ? 'no structured bug reports among open issues'
-      : 'nothing merged; all structured issues went to a human',
-    evidence: { merged: null, needsHuman: toHuman.map(summaryOf), skipped },
+    reason: candidates.length ? 'nothing merged; all issues went to a human' : 'no open issues to process',
+    evidence: { merged: null, needsHuman: toHuman.map(summaryOf) },
   });
-  ctx.log.say(
-    !candidates.length ? '\nNo open issues to process.'
-      : !tried ? '\nNo structured bug reports among open issues.'
-      : '\nNothing merged.',
-  );
+  ctx.log.say(candidates.length ? '\nNothing merged.' : '\nNo open issues to process.');
   printHanded(ctx, toHuman);
   return 3;
 }

@@ -148,7 +148,7 @@ npm run dev -- run --repo acme/shop --dry-run
 
 ## Writing issues the factory can take
 
-Issues need a body in the issue form's rendered format: one `### <Label>` heading per field. The factory looks at every open issue (oldest first); bodies that are not a structured bug report are skipped without commenting.
+The factory looks at every open issue (oldest first). Prefer the issue form's rendered format (one `### <Label>` heading per field). Free-form bug write-ups are accepted too: an LLM extracts component, description, input, expected and actual. If it cannot pin down concrete values, the issue goes to a human.
 
 ````markdown
 ### Component
