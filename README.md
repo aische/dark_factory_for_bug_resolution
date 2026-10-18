@@ -264,3 +264,7 @@ test/               unit tests
 - **Judges can miss things.** A fixer can special-case the test's exact input; only the fix judge looks for that.
 - **Simple checks.** The import check is line-based (Python and TypeScript). The secret check is a short list of patterns.
 - **TypeScript means Vitest.** Jest is not a separate runner yet; a repo without vitest is rejected at setup.
+
+## Example buggy2
+
+https://github.com/aische/buggy2
