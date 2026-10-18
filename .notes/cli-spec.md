@@ -32,12 +32,12 @@ This is the cut-down build of [Dark Factory for Bug Resolution — Requirements]
 
 Every check returns `pass`, `fail` or `unknown`. Only `pass` moves on; `fail`, `unknown`, timeouts, crashes and parse errors all lead to a comment for a human.
 
-Each "judge" step has two parts:
+Each "judge" step has two parts, and both must pass:
 
-- **Checks**: deterministic code. They are what lets a change through.
-- **LLM judge**: may reject, never approve. Its rejection is a `fail`; its approval adds nothing. An unparseable answer or an API error is `unknown`.
+- **Checks**: deterministic code. They establish that the test and the fix *work*: the test fails on base for the right reason, and after the fix the repro test and the whole suite are green.
+- **LLM judge**: reviews whether the test and the fix are *written well*: readable, focused, in the style of the repo, fixing the cause and not the symptom. A `bad` verdict is a `fail`. An unparseable answer or an API error is `unknown`.
 
-So an LLM can stop a bad test or a bad fix, but no LLM output is ever the reason something ships (P2).
+A judge can stop a test or fix that works but is badly written. It can never let through one that does not work: green tests are required no matter what the judge says (P2).
 
 ## Flow
 
@@ -161,7 +161,14 @@ Literals: numbers compare numerically within `1e-9` (so `0.00`, `0.0`, `0` match
 
 ### C-TEST-4 LLM test judge
 
-Given the report, the test source and the failure output: does this test check the behaviour the report describes, or does it test a side detail, assert something trivially true, or depend on details the report does not mention? JSON `{"reject": true|false, "reason": "..."}` (C-PROMPT-3).
+Runs only after C-TEST-3 passed. Given the report, the test source, the failure output and an existing test as a style reference, the judge decides whether the test is written well (criteria in C-PROMPT-3):
+
+- it checks the behaviour the report describes, with the reported input and expected value;
+- it is clear: a descriptive name, one behaviour, arrange–act–assert, no loops, conditionals or helper logic it does not need;
+- it follows the conventions of the existing tests: imports, fixtures, naming, assertion style;
+- it is deterministic and self-contained: no mocks of the code under test, no time, randomness, network or files.
+
+Answer JSON `{"verdict": "good" | "bad", "reasons": ["..."]}`. `bad` is a `fail`; the reasons go into the comment for a human.
 
 ### C-TEST-5 Lock and push
 
@@ -236,7 +243,14 @@ The repro test passes in `test.runs` of `test.runs` runs, and the full suite pas
 
 ### C-POST-4 LLM fix judge
 
-Given the report, the locked test and the diff: does the change fix the root cause, or does it special-case the test's inputs, work around configuration in code, or change unrelated behaviour? JSON `{"reject": true|false, "reason": "..."}` (C-PROMPT-5). This is the backstop for N3 if the fixer hardcodes `if country == "AT"` instead of editing the protected config.
+Runs only after C-POST-2 and C-POST-3 passed, so every test is already green. Given the report, the locked test, the diff and the full content of each changed file after the fix, the judge decides whether the implementation is written well (criteria in C-PROMPT-5):
+
+- it fixes the root cause, not the symptom: no special-casing of the test's input, no hardcoded expected values, no working around configuration or data in code;
+- it is minimal and focused: no unrelated changes, no dead code, debug output or commented-out code;
+- it reads like the surrounding code: naming, idiom, structure, comment density;
+- it does not obviously break inputs the old code handled, for example by calling a method on a value that can be missing.
+
+Answer JSON `{"verdict": "good" | "bad", "reasons": ["..."]}`. `bad` is a `fail`. This is also the backstop for N3 if the fixer hardcodes `if country == "AT"` instead of editing the protected config.
 
 ### C-POST-5 Push
 
@@ -265,10 +279,10 @@ Run: <runId> · base <short sha> · fixer <fixer> (<provider>/<model>)
 |---|---|
 | triage | trivial |
 | test checks | fails 3/3 on base with an assertion |
-| test judge | no objection |
+| test judge | good: <first reason> |
 | diff checks | 1 file, 2 lines, src/shipping.py |
 | tests after fix | repro 3/3 green, suite green |
-| fix judge | no objection |
+| fix judge | good: <first reason> |
 ```
 
 ### C-HUM-1 Comment for a human
@@ -375,9 +389,9 @@ User: the report; `git ls-files`; every file under `src/` (cap 100 KB); the firs
 
 ### C-PROMPT-3 Test judge
 
-System: "You review a reproducing test for a bug report. Reject it if it does not check the reported behaviour with the reported input and expected value, if it asserts something trivially true, or if it tests a side detail. Answer JSON {\"reject\": boolean, \"reason\": string}."
+System: "You review a reproducing test written for a bug report, as a strict senior reviewer. The test already fails on the current code with an assertion error. Judge whether it is written well. It is bad if any of these hold: it does not check the behaviour the report describes with the reported input and expected value; it asserts something trivially true or a side detail; its name does not say what it checks; it tests more than one behaviour; it contains loops, conditionals or helper logic it does not need; it does not follow the conventions of the example test (imports, fixtures, naming, assertion style); it mocks the code under test or depends on time, randomness, network or files. Answer JSON {\"verdict\": \"good\" | \"bad\", \"reasons\": string[]}. Give reasons for either verdict."
 
-User: the report, the test source, the failure output.
+User: the report, an existing test as style reference, the test source, the failure output.
 
 ### C-PROMPT-4 Fixer
 
@@ -404,9 +418,9 @@ Rules:
 
 ### C-PROMPT-5 Fix judge
 
-System: "You review a bug fix. Reject it if it special-cases the test's input values, hardcodes the expected answer, works around configuration or data in code, or changes behaviour unrelated to the report. Answer JSON {\"reject\": boolean, \"reason\": string}."
+System: "You review a bug fix as a strict senior reviewer. All tests, including the reproducing test, already pass. Judge whether the implementation is written well. It is bad if any of these hold: it special-cases the test's input values or hardcodes the expected answer; it works around configuration or data in code instead of fixing the cause; it changes behaviour unrelated to the report; it adds dead code, debug output or commented-out code; it does not read like the surrounding code (naming, idiom, structure, comment density); it is larger than the fix needs; it obviously breaks inputs the old code handled, for example by calling a method on a value that can be missing. Answer JSON {\"verdict\": \"good\" | \"bad\", \"reasons\": string[]}. Give reasons for either verdict."
 
-User: the report, the locked test, the diff.
+User: the report, the locked test, the diff, the full content of each changed file after the fix.
 
 ## Evidence log
 
