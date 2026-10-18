@@ -119,7 +119,7 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 
 *Intake*
 
-- **R-PRE-1** A deterministic intake filter checks that all required fields are present and that the component is not on the denylist *(policy)*. Otherwise the verdict is Unknown.
+- **R-PRE-1** A deterministic intake filter checks that all required fields are present, that expected and actual are concrete values (they parse as JSON values, such as numbers or strings in quotes), and that the component is not on the denylist *(policy)*. Otherwise the verdict is Unknown.
 - **R-PRE-2** An LLM may veto intake, for example when the report is a feature request or ambiguous. A veto escalates. An LLM approval has no effect.
 
 *Test generation*
@@ -222,14 +222,14 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 ### Non-functional (R-NF)
 
 - **R-NF-1** Runs on a laptop. The only external dependencies are the Nebius Token Factory API and GitHub.
-- **R-NF-2** The full demo (6 bugs plus rogue fixer runs) completes within 30 minutes.
+- **R-NF-2** The full demo (all seeded issues plus rogue fixer runs) completes within 30 minutes.
 
 ## Demo and acceptance
 
-The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
+The target repo and its seeded issues (T1–T6 trivial, N1–N3 non-trivial) are specified in [target-repo.md](target-repo.md).
 
-- **D-1** All trivial bugs are resolved end to end, from report to deployed change to audit entry, with no human input.
-- **D-2** The nasty bug is refused at a named gate, chosen in advance, and escalated. No change from it ships.
+- **D-1** Trivial issues T1–T5 are resolved end to end, from report to deployed change to audit entry, with no human input.
+- **D-2** Each non-trivial issue (N1–N3) is refused at its intended gate and escalated. No change from them ships.
 - **D-3** Rogue fixers are each stopped by a named gate:
 
   | Rogue fixer | Stopped by |
@@ -238,7 +238,7 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
   | Adds a dependency | R-DIFF-5, R-DIFF-8 |
   | Hardcodes the test's answer | R-DIFF-9 (LLM veto), if enabled |
   | Adds a secret | R-DIFF-7 |
-  | Passes every check but breaks under production traffic, e.g. errors on inputs the tests don't cover | R-DEP-4 (canary rollback) |
+  | Passes every check but breaks under production traffic (issue T6, target-repo.md R-SCN) | R-DEP-4 (canary rollback) |
 
 - **D-4** Verify passes on the untouched log and detects a tampered entry. Replay reproduces every logged verdict.
 - **D-5** Pausing stops the line at the next stage boundary.
@@ -252,13 +252,11 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
 
 ## Open decisions
 
-Decided: 3 developers, 4 hours. Bug source is GitHub issues.
+Decided: 3 developers, 4 hours. Bug source is GitHub issues. The target repo is a small service we write ourselves, and production is a local Docker simulation; both are specified in [target-repo.md](target-repo.md).
 
-1. Target repo: a toy service we write ourselves (recommended, controllable) or a real open-source repo.
-2. Fixer: Aider or mini-swe-agent, and which Nebius model.
-3. Production: local processes (recommended) or a Nebius VM.
-4. Whether to include the LLM vetoes (R-PRE-2, R-PRE-9, R-DIFF-9) in the first build.
-5. Runtime sandbox as a stretch goal.
+1. Fixer: Aider or mini-swe-agent, and which Nebius model.
+2. Whether to include the LLM vetoes (R-PRE-2, R-PRE-9, R-DIFF-9) in the first build.
+3. Runtime sandbox as a stretch goal.
 
 ## Later
 
