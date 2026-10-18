@@ -4,112 +4,306 @@ Oct 18, 2026 · @Daniel van den Eijkel
 
 ## Purpose and scope
 
-This is the cut-down build of [Dark Factory for Bug Resolution — Requirements](Dark%20Factory%20for%20Bug%20Resolution%20—%20Requirements.md), sized for one developer and a few hours. It keeps the trust story: gates that are deterministic code, a locked reproducing test, a black-box fixer, and a merge to `main` with no human approval. It drops the production side entirely.
+This is the cut-down build of [Dark Factory for Bug Resolution — Requirements](Dark%20Factory%20for%20Bug%20Resolution%20—%20Requirements.md), sized for one developer and a few hours. A TypeScript CLI takes a repo and an optional commit, finds the first trivial issue, fixes it on a branch through a black-box fixer, and merges it to `main` with no human approval. Issues it cannot handle get a comment for a human.
 
-**In scope**
+**The six steps**
 
-- A TypeScript CLI, `factory run`, that takes a GitHub repo and an optional commit sha.
-- It walks open `factory` issues oldest first. Each issue it cannot handle gets a comment and a `factory:needs-human` label, and the loop moves on. The run stops after the first issue it resolves.
-- Resolving an issue means: generate a reproducing test, validate and lock it, hand the repo to a fixer, run the post-checks on the fixer's diff, and commit the test and fix to `main`.
-- Swappable LLM provider for the factory's own calls: DeepSeek (default) or Nebius Token Factory.
-- Swappable fixer: OMP (default), Claude Code, or a staged rogue fixer.
-- A JSONL evidence log per run.
-- The minimal target repo with seeded issues, so the demo has something to work on.
+1. Call the CLI with a repo and an optional sha.
+2. Find a trivial issue. Issues that are not trivial get a comment for a human; move on to the next.
+3. Create a branch and commit a reproducing test. Judge whether the test is good.
+4. Give the branch to the fixer.
+5. Post-check the fixer's result: check tests and diff, judge whether the fix is good.
+6. If anything in steps 3–5 fails, comment on the issue and go back to step 2. If it succeeds, merge to `main` and stop.
+
+**Swappable parts**
+
+- LLM provider for the factory's own calls: DeepSeek (default) or Nebius Token Factory.
+- Fixer: OMP (default), Claude Code, or a staged rogue fixer.
 
 **Out of scope** (compared with the full requirements)
 
-- Deploy, canary, feature flag, observer, usage simulator and rollback (R-DEP, R-DPL, R-FLG, R-OBS, R-RB, R-SIM, R-SCN, issue T6). "Shipped" means committed to `main`.
-- LLM vetoes (R-PRE-2, R-PRE-9, R-DIFF-9).
-- Secret scanner (R-DIFF-7), syntax-tree import and API check (R-DIFF-8; a line-based import check replaces it), changed-line coverage (R-OR-3).
-- Signed, hash-chained audit log, verify and replay (R-AUD-2, R-AUD-5, R-AUD-6).
-- Pause switch, live view, manual rollback (R-HUM).
+- Deploy, canary, feature flag, observer, usage simulator, rollback (R-DEP and everything in target-repo.md beyond the repo and its issues). "Shipped" means merged to `main`.
+- Retries. Every issue gets one test and one fix attempt.
+- Secret scanner, syntax-tree import check, changed-line coverage (R-DIFF-7, R-DIFF-8, R-OR-3).
+- Signed audit log, verify, replay, pause, live view (R-AUD-2, R-AUD-5, R-AUD-6, R-HUM).
 - Runtime sandbox for the fixer.
 
-## Principles
+## How judging works
 
-The principles P1–P6 from the full requirements still apply. P7 (canary) is dropped with the deploy. In short:
+Every check returns `pass`, `fail` or `unknown`. Only `pass` moves on; `fail`, `unknown`, timeouts, crashes and parse errors all lead to a comment for a human.
 
-- Only deterministic code can let a change through. LLMs write candidates and nothing else.
-- Every gate returns `pass`, `fail` or `unknown`. Only `pass` advances. Everything else, including timeouts, crashes and parse errors, ends with a human.
-- The fixer never sees a test it could change and get away with. The pipeline writes the test, hashes it, and checks the hash after applying the fixer's diff.
-- The only thing taken from the fixer is a diff, applied by the pipeline to a fresh checkout.
-- Every gate writes its verdict and evidence to the log.
+Each "judge" step has two parts:
+
+- **Checks**: deterministic code. They are what lets a change through.
+- **LLM judge**: may reject, never approve. Its rejection is a `fail`; its approval adds nothing. An unparseable answer or an API error is `unknown`.
+
+So an LLM can stop a bad test or a bad fix, but no LLM output is ever the reason something ships (P2).
 
 ## Flow
 
 ```mermaid
 flowchart TD
-    START(["factory run --repo R [--sha S]"]) --> SETUP["Setup<br/>clone · resolve base · venv · labels"]
-    SETUP --> SUITE{"Suite green on base?"}
-    SUITE -->|no| ABORT(["Abort run, exit 1"])
-    SUITE -->|yes| NEXT["Next open factory issue<br/>oldest first, skip status labels"]
-    NEXT -->|none left| DONE0(["Exit 3: nothing fixed"])
-    NEXT --> IN["Intake<br/>parse form · concrete values · denylist"]
-    IN -->|pass| GEN["Generate repro test<br/>LLM"]
-    GEN --> VAL["Validate<br/>fails N of N · assertion failure"]
-    VAL -->|pass| MATCH["Matches report<br/>inputs · expected · actual"]
-    VAL & MATCH -->|"fail, attempts left"| GEN
-    MATCH -->|pass| LOCK["Lock test<br/>content + sha256 in memory and log"]
-    LOCK --> FIX["Fixer<br/>omp · claude · rogue"]
-    FIX -->|diff| APPLY["Apply to fresh checkout"]
-    APPLY --> DIFF["Diff checks<br/>tests untouched · hash · paths · size · imports"]
-    DIFF -->|pass| ORA["Oracle<br/>repro green N of N · suite green"]
-    APPLY & DIFF & ORA -->|"fail, attempts left"| FIX
-    ORA -->|pass| MRG["Commit test + fix to main<br/>re-verify if main moved"]
-    MRG -->|pushed| RES["Comment · factory:resolved · close"]
-    RES --> DONE(["Exit 0"])
-
-    ESC[["Escalate<br/>comment · factory:needs-human"]]
-    IN -->|"fail / unknown"| ESC
-    VAL & MATCH -->|"unknown, or no attempts left"| ESC
-    FIX -->|"timeout · crash · empty diff"| ESC
-    APPLY & DIFF & ORA -->|"unknown, or no attempts left"| ESC
-    MRG -->|"conflict · checks fail on new head"| ESC
-    ESC --> NEXT
+    S1["1 · factory run --repo R [--sha S]<br/>clone · base sha · venv · suite green on base"] --> S2
+    S2["2 · Next open factory issue, oldest first<br/>form checks · LLM triage"]
+    S2 -->|"none left"| NONE(["Exit 3"])
+    S2 -->|"not trivial"| HUM
+    S2 -->|trivial| S3["3 · Branch factory/issue-n<br/>generate + commit repro test<br/>checks · LLM test judge · push branch"]
+    S3 -->|pass| S4["4 · Fixer on a clone of the branch<br/>omp · claude · rogue → diff"]
+    S4 -->|diff| S5["5 · Apply diff, commit on branch<br/>diff checks · tests green · LLM fix judge"]
+    S5 -->|pass| S6["6 · Merge branch to main<br/>re-check if main moved · comment · close"]
+    S6 --> DONE(["Exit 0"])
+    S3 & S4 & S5 & S6 -->|"fail / unknown"| HUM[["Comment for human<br/>factory:needs-human"]]
+    HUM --> S2
 ```
 
-## CLI
+## Step 1 — CLI and setup
 
 ### C-CLI-1 Command
 
 ```
-factory run --repo <owner/name | github url> [--sha <sha>] [--fixer omp|claude|rogue-edit-test]
-            [--provider deepseek|nebius] [--issue <number>] [--dry-run] [--policy <path>]
+factory run --repo <owner/name | github url> [--sha <sha>]
+            [--fixer omp|claude|rogue-edit-test] [--provider deepseek|nebius]
+            [--issue <number>] [--dry-run] [--policy <path>]
 ```
 
 - `--repo` (required): normalised to `owner/name`.
-- `--sha`: the base commit. Without it, the base is the head of the remote default branch: `origin/HEAD`, falling back to `main` and then `master`. A sha that does not exist is a usage error.
-- `--fixer`: overrides `fixer.name` in the policy.
-- `--provider`: overrides `llm.provider` in the policy. The fixer uses the same provider unless `fixer.provider` is set.
-- `--issue`: process only this issue, even if older ones are open. Used for the rogue demo and for debugging.
-- `--dry-run`: no GitHub writes and no push. Comments, labels and the commit are printed instead. Everything else runs.
+- `--sha`: the base commit. Without it, the head of the default branch: `origin/HEAD`, falling back to `main`, then `master`. An unknown sha is a usage error.
+- `--fixer`, `--provider`: override the policy (C-CFG-1).
+- `--issue`: process only this issue. For the rogue demo and debugging.
+- `--dry-run`: no GitHub writes and no pushes; print them instead.
 - `--policy`: defaults to `factory.policy.json` in the current directory.
 
 ### C-CLI-2 Exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | One issue resolved and pushed |
-| 1 | Factory error (setup failed, suite red on base, GitHub or git error, log write failed) |
+| 0 | One issue fixed and merged |
+| 1 | Factory error: setup failed, suite red on base, git or GitHub error |
 | 2 | Usage or configuration error |
-| 3 | No issue resolved: none open, or all escalated |
+| 3 | Nothing merged: no open issues, or all went to a human |
 
 ### C-CLI-3 Console output
 
-One line per gate, for example `#12  repro.validate  FAIL  test passed on base in 3/3 runs`. At the end, print the resolved issue and commit URL, or the list of escalated issues.
+One line per check, for example `#12  test.checks  FAIL  test passed on base in 3/3 runs`. At the end, the merged issue and commit URL, or the list of issues handed to a human.
 
 ### C-CLI-4 Environment
 
-Read from the process env (use `node --env-file=.env`):
+- `DEEPSEEK_API_KEY` and/or `NEBIUS_API_KEY`, for whichever providers are selected. Missing is a configuration error at startup. Load with `node --env-file=.env`.
+- GitHub goes through the `gh` CLI, logged in, with `gh auth setup-git` done so `git push` over HTTPS works.
 
-- `DEEPSEEK_API_KEY`, `NEBIUS_API_KEY`: whichever the selected providers need. A missing key is a configuration error at startup.
-- GitHub access goes through the `gh` CLI. It must be logged in (`gh auth status`), with `gh auth setup-git` done so `git push` over HTTPS works.
+### C-RUN-1 Setup
 
-## Policy file
+1. Run id `YYYYMMDD-HHMMSS-<4 hex>`. All files go under `.factory/runs/<runId>/` (gitignored).
+2. `git clone https://github.com/<repo>.git .factory/runs/<runId>/repo`. Resolve the default branch name and the base sha; check out the base sha detached.
+3. Create a venv in `.factory/runs/<runId>/venv` and install `requirements.txt` / `requirements-dev.txt` if present. Every test run uses `<venv>/bin/python -m pytest`. The target package is not installed; the target repo's pytest config puts `src` on the path (C-TGT-3), so each checkout tests its own code.
+4. Create the labels `factory`, `factory:in-progress`, `factory:resolved`, `factory:needs-human` with `gh label create --force`.
+5. Run the full suite on the base. If it is not green, nothing later can be trusted: exit 1 without touching any issue (R-PRE-7).
 
-### C-POL-1 Format
+## Step 2 — Find a trivial issue
 
-One JSON file, `factory.policy.json`, validated with zod at startup. Its sha256 is written in every log entry. Defaults:
+### C-FIND-1 Candidates
+
+`gh issue list --repo <repo> --label factory --state open --json number,title,body,labels,createdAt --limit 200`, oldest first. Skip issues with `factory:in-progress`, `factory:resolved` or `factory:needs-human`. Take the first remaining one and add `factory:in-progress`. Remove it again on every way out of the issue.
+
+### C-FIND-2 Form checks
+
+The body is the markdown GitHub renders from the issue form: one `### <Label>` heading per field. Parse it into:
+
+```ts
+interface BugReport {
+  number: number;
+  title: string;
+  component: string;
+  description: string;
+  input: Record<string, Scalar>;   // Input field, a JSON object
+  expected: Scalar;                // Expected field, a JSON value
+  actual: Scalar;                  // Actual field, a JSON value
+}
+type Scalar = number | string | boolean | null;
+```
+
+Not trivial if any field is missing or `_No response_`, `Input` is not a JSON object of scalars, `Expected` or `Actual` is not a JSON scalar (strings must be quoted), `expected === actual`, or the component is on `triage.componentDenylist`.
+
+### C-FIND-3 LLM triage
+
+One chat completion: given the report and the list of files, is this a small, localized bug in the code with a concrete wrong value, or something else (feature request, race condition, config or data problem, too vague)? Answer JSON `{"trivial": true|false, "reason": "..."}` (prompt in C-PROMPT-1). `false` means not trivial. `true` adds nothing; the form checks already had to pass.
+
+### C-FIND-4 Not trivial
+
+Comment for a human (C-HUM-1) with the reason and go to the next issue. N2 stops here.
+
+## Step 3 — Branch and reproducing test
+
+### C-TEST-1 Generate
+
+One chat completion (C-PROMPT-2) with the report, the file list, every file under `src/` (capped at 100 KB) and one existing test as a style example. Take the first ```` ```python ```` block. The pipeline writes the file itself, so the generator can only ever add this one file.
+
+### C-TEST-2 Branch and commit
+
+In a fresh clone of the run's `repo/` (C-WS-1): `git checkout -b factory/issue-<n> <baseSha>`, write the test to `tests/repro/test_issue_<n>.py`, commit `Add reproducing test for #<n>` under the factory identity. Call this commit `R`.
+
+### C-TEST-3 Checks (deterministic)
+
+Run the new test `test.runs` times (default 3). Each run must:
+
+- exit with code 1;
+- have at least one testcase, all of them `failure` in the JUnit XML (not `error` or `skipped`);
+- fail on an assertion: the first line of the failure text starting with `E ` matches `^E\s+(assert\b|AssertionError\b)`. A `TypeError` or `ImportError` is the wrong reason (R-PRE-5).
+
+Mixed results across runs are `unknown` (flaky). Then, on the test source and the failure text (R-PRE-8):
+
+- every value in `report.input` appears as a literal in the test source;
+- `report.expected` appears as a literal on a line starting with `assert`;
+- `report.actual` appears as a literal in the failure's `E ` lines;
+- the source has `def test_` and none of `pytest.mark.skip`, `pytest.mark.xfail`, `pytest.skip(`.
+
+Literals: numbers compare numerically within `1e-9` (so `0.00`, `0.0`, `0` match), strings match with either quote style, `true`/`false`/`null` match `True`/`False`/`None`. N1 stops here: its race does not reproduce in-process, so the test passes on base.
+
+### C-TEST-4 LLM test judge
+
+Given the report, the test source and the failure output: does this test check the behaviour the report describes, or does it test a side detail, assert something trivially true, or depend on details the report does not mention? JSON `{"reject": true|false, "reason": "..."}` (C-PROMPT-3).
+
+### C-TEST-5 Lock and push
+
+Record the sha256 of the test file in the log and keep its content in memory. Push the branch to GitHub (`git push origin factory/issue-<n>`; skipped in dry run). From here on, the pipeline only trusts this hash and this content.
+
+## Step 4 — Fixer
+
+### C-FIX-1 Interface
+
+```ts
+interface FixerInput {
+  workspace: string;        // clone of the branch, HEAD at R
+  issue: BugReport;
+  prompt: string;           // C-PROMPT-4
+  testCommand: string;      // "<venv>/bin/python -m pytest tests/repro/test_issue_<n>.py -q"
+  provider: ResolvedProvider;  // name, baseURL, anthropicBaseURL?, apiKey, model
+}
+
+interface FixerLaunch {
+  cmd: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+interface Fixer {
+  name: string;
+  supports(provider: string): boolean;
+  launch(input: FixerInput): FixerLaunch;
+}
+```
+
+The pipeline owns everything around the launch: workspace, environment, timeout, taking the diff. Adapters live in `src/fixers/`, one file each, registered by name. At startup, a fixer that does not support the chosen provider is a configuration error.
+
+### C-FIX-2 Adapters
+
+| Fixer | Providers | Launch |
+|---|---|---|
+| `omp` | deepseek, nebius | `omp -p --cwd <ws> --model <provider>/<model> --api-key <key> --auto-approve --no-session --no-extensions --no-skills --no-rules --max-time <timeout>s <prompt>`. DeepSeek is built into OMP (`deepseek/deepseek-v4-pro`). Nebius needs a custom OpenAI-compatible provider in an overlay passed with `--config fixers/omp-nebius.yml`; check the overlay format in the OMP docs. |
+| `claude` | deepseek | `claude -p --output-format json --permission-mode bypassPermissions --max-turns 40 <prompt>`, cwd `<ws>`, env `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`, `ANTHROPIC_AUTH_TOKEN=<key>`, `ANTHROPIC_MODEL=<model>`, `ANTHROPIC_SMALL_FAST_MODEL=<model>`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Nebius has no Anthropic-compatible endpoint, so not supported. |
+| `rogue-edit-test` | any | `node <factory>/dist/fixers/rogue.js edit-test`, cwd `<ws>`. Rewrites every `assert` line in the repro test to `assert True`, changes nothing else. |
+
+### C-FIX-3 Run
+
+1. Fresh clone of the branch at `R` (C-WS-1).
+2. Environment is only `PATH` (with `<venv>/bin` first), `HOME`, `LANG`, `TERM=dumb`, plus the adapter's env. Never `GITHUB_TOKEN`, `GH_TOKEN` or another provider's key (R-FIX-7).
+3. Spawn detached; kill the process group after `fixer.timeoutSec` (default 600). Save stdout and stderr to `issue-<n>/fixer.log`.
+4. After exit: `git add -A`, then `git diff --cached --binary R > issue-<n>/fixer.diff`. Diffing against `R` also catches any commits the fixer made. This diff is the only thing taken from the fixer (P5).
+
+Timeout, non-zero exit or an empty diff: `unknown`, comment for a human.
+
+## Step 5 — Post-check
+
+### C-POST-1 Apply and commit
+
+Fresh clone of the branch at `R`. `git apply --check`, then `git apply`; if it does not apply, `fail`. Commit `Fix #<n>: <title>` under the factory identity, with trailers `Factory-Run: <runId>`, `Fixer: <fixer> (<provider>/<model>)`, `Test-SHA256: <hash>`.
+
+### C-POST-2 Diff checks (deterministic)
+
+From `git apply --numstat --summary` on the patch, the patch text, and the files after applying. First failure wins:
+
+1. **Tests untouched:** no changed path under `tests/` or named `test_*.py`, `*_test.py`, `conftest.py` (R-DIFF-2).
+2. **Locked hash:** sha256 of `tests/repro/test_issue_<n>.py` equals the locked hash (R-DIFF-3).
+3. **Protected paths:** no changed path matches `diff.protectedPaths`; the reason names the path. N3 stops here if the fixer edits `config/shipping_rates.yaml`.
+4. **Allowed paths:** every changed path matches `diff.allowedPaths` (`src/**`).
+5. **File operations:** no binary files, creates, deletes, renames, mode changes or symlinks.
+6. **Size:** at most 2 files, 20 changed lines, 3 hunks.
+7. **No new imports:** no added line matching `^\+\s*(import\s|from\s+\S+\s+import\s)` or containing `__import__(` or `importlib`.
+
+### C-POST-3 Tests (deterministic)
+
+The repro test passes in `test.runs` of `test.runs` runs, and the full suite passes once. Timeout is `unknown`.
+
+### C-POST-4 LLM fix judge
+
+Given the report, the locked test and the diff: does the change fix the root cause, or does it special-case the test's inputs, work around configuration in code, or change unrelated behaviour? JSON `{"reject": true|false, "reason": "..."}` (C-PROMPT-5). This is the backstop for N3 if the fixer hardcodes `if country == "AT"` instead of editing the protected config.
+
+### C-POST-5 Push
+
+All passed: push the branch with the fix commit.
+
+## Step 6 — Merge, or comment and continue
+
+### C-MRG-1 Merge
+
+1. `git fetch origin <default branch>`.
+2. If its head is still the base sha: `git push origin factory/issue-<n>:<default branch>`. This is a fast-forward; `main` gets the test commit and the fix commit.
+3. If `main` moved: rebase the branch onto it. A conflict is `fail`. Otherwise run C-POST-2 and C-POST-3 again on the rebased branch, force-push the branch, and push it to `main` as in 2. A second rejected push is `unknown`.
+4. Never force-push `main`.
+
+### C-MRG-2 Resolve
+
+Comment, add `factory:resolved`, remove `factory:in-progress`, `gh issue close --reason completed`, delete the remote branch. Exit 0.
+
+```
+Fixed by the dark factory and merged to <branch>.
+
+Commits: <test commit url>, <fix commit url>
+Run: <runId> · base <short sha> · fixer <fixer> (<provider>/<model>)
+
+| Check | Result |
+|---|---|
+| triage | trivial |
+| test checks | fails 3/3 on base with an assertion |
+| test judge | no objection |
+| diff checks | 1 file, 2 lines, src/shipping.py |
+| tests after fix | repro 3/3 green, suite green |
+| fix judge | no objection |
+```
+
+### C-HUM-1 Comment for a human
+
+Used by every `fail` or `unknown` in steps 2–6. Comment, add `factory:needs-human`, remove `factory:in-progress`, leave the issue open. If the branch was already pushed, leave it; the comment links it so a human can start from the reproducing test. Never retried automatically. Then go back to step 2.
+
+```
+The dark factory needs a human for this issue.
+
+Step: <step and check, e.g. "post-check · protected paths">
+Result: <fail|unknown>
+Reason: <reason>
+Branch: <branch url, if pushed>
+Run: <runId> · base <short sha>
+```
+
+## Workspaces
+
+### C-WS-1 Clones
+
+Every working copy is a fresh local clone of the run's `repo/` under `.factory/runs/<runId>/issue-<n>/` (`test/`, `fixer/`, `verify/`). Branch pushes go from the `repo/` clone after fetching the branch back from the working copy. The fixer's clone has the local `repo/` as its only remote and no GitHub credentials in its env, so it cannot push the branch itself.
+
+### C-WS-2 Local excludes
+
+Each clone's `.git/info/exclude` gets `.omp/`, `.claude/`, `__pycache__/`, `.pytest_cache/`, `*.pyc`, so agent state and Python caches never show up in a diff.
+
+### C-WS-3 Pytest runner
+
+One helper runs pytest with `-q -p no:cacheprovider --junitxml=<issue dir>/junit/<name>.xml` and `tests.timeoutSec`, and returns exit code, stdout, stderr, timed-out flag, and each testcase's outcome (`passed | failure | error | skipped`) and failure text, parsed with `fast-xml-parser`.
+
+## Configuration
+
+### C-CFG-1 Policy file
+
+`factory.policy.json`, validated with zod at startup. Its sha256 goes into every log entry.
 
 ```json
 {
@@ -131,21 +325,9 @@ One JSON file, `factory.policy.json`, validated with zod at startup. Its sha256 
     "timeoutSec": 120,
     "temperature": 0
   },
-  "fixer": {
-    "name": "omp",
-    "provider": null,
-    "model": null,
-    "timeoutSec": 600,
-    "attempts": 2
-  },
-  "repro": {
-    "dir": "tests/repro",
-    "attempts": 2,
-    "runs": 3
-  },
-  "intake": {
-    "componentDenylist": []
-  },
+  "fixer": { "name": "omp", "provider": null, "model": null, "timeoutSec": 600 },
+  "triage": { "componentDenylist": [] },
+  "test": { "dir": "tests/repro", "runs": 3 },
   "diff": {
     "allowedPaths": ["src/**"],
     "protectedPaths": [
@@ -155,329 +337,49 @@ One JSON file, `factory.policy.json`, validated with zod at startup. Its sha256 
     ],
     "maxFiles": 2,
     "maxChangedLines": 20,
-    "maxHunks": 3,
-    "forbidNewImports": true
+    "maxHunks": 3
   },
-  "tests": {
-    "python": "python3",
-    "timeoutSec": 120
-  },
-  "git": {
-    "authorName": "Dark Factory",
-    "authorEmail": "factory@localhost"
-  },
-  "demoRepo": null
+  "tests": { "python": "python3", "timeoutSec": 120 },
+  "git": { "authorName": "Dark Factory", "authorEmail": "factory@localhost" }
 }
 ```
 
-Check the Nebius model id against the Token Factory catalog before the first Nebius run; it is only a placeholder.
+The Nebius model id is a placeholder; check it against the Token Factory catalog before the first Nebius run.
 
-### C-POL-2 Swapping providers
+### C-CFG-2 Swapping the provider
 
-Changing `llm.provider` (or passing `--provider`) is the only step needed to move the factory's own LLM calls between DeepSeek and Nebius. Both use the OpenAI-compatible chat completions API, through the `openai` npm package with `baseURL` and `apiKey` taken from the provider entry. No code branches on the provider name.
-
-## Run setup
-
-### C-RUN-1 Run id and directories
-
-A run id is `YYYYMMDD-HHMMSS-<4 hex>`. All files for a run live under `.factory/runs/<runId>/` in the current directory (gitignored):
-
-```
-.factory/runs/<runId>/
-  log.jsonl
-  base/                       clone of the target repo, checked out at the base sha
-  venv/                       Python environment shared by every checkout in this run
-  issue-<n>/
-    repro-<a>/                checkout used to validate repro attempt a
-    locked/test_issue_<n>.py  copy of the locked test, for humans only
-    fixer-<k>/                fixer workspace for attempt k
-    fixer-<k>.log             fixer stdout and stderr, in full
-    fixer-<k>.diff            the diff taken from the fixer
-    verify-<k>/               checkout used for post-checks of attempt k
-    junit/                    pytest JUnit XML files
-```
-
-### C-RUN-2 Base
-
-1. `git clone https://github.com/<repo>.git base`.
-2. Resolve the default branch name and the base sha (C-CLI-1). Keep both: the branch is where the fix is pushed.
-3. `git checkout --detach <baseSha>`.
-
-### C-RUN-3 Python environment
-
-Create `venv/` with `<tests.python> -m venv`, then install `requirements.txt` and `requirements-dev.txt` from the base checkout if present. Every pytest run uses `<venv>/bin/python -m pytest`. The target package is **not** installed; the target repo's pytest config puts `src` on the path (C-TGT-3), so each checkout tests its own code.
-
-### C-RUN-4 Labels
-
-Create the labels `factory`, `factory:in-progress`, `factory:resolved` and `factory:needs-human` with `gh label create --force`, which is idempotent.
-
-### C-RUN-5 Suite green on base
-
-Run the full suite once on the base checkout (R-PRE-7). If it is not green, nothing that follows can be trusted: log it and exit 1 without touching any issue.
-
-## Checkouts
-
-### C-WS-1 Making a checkout
-
-Every workspace (repro, fixer, verify) is a fresh local clone of `base/`: `git clone -q <runDir>/base <ws>`, then `git checkout -q -b factory/issue-<n> <sha>`. Its `origin` is the local `base/`, so nothing inside it can push to GitHub.
-
-### C-WS-2 Repro commit
-
-To put the locked test into a checkout, write its content (from memory, never from another workspace) to `tests/repro/test_issue_<n>.py` and commit it under the factory identity. Record that commit's sha as `R` for this workspace.
-
-### C-WS-3 Local excludes
-
-Write `.omp/`, `.claude/`, `__pycache__/`, `.pytest_cache/` and `*.pyc` into each checkout's `.git/info/exclude`, so agent state and Python caches never show up in a diff.
-
-## Gates
-
-### C-GATE-1 Shape
-
-```ts
-type Verdict = "pass" | "fail" | "unknown";
-
-interface GateResult {
-  gate: string;            // e.g. "repro.validate"
-  verdict: Verdict;
-  reason: string;          // one line, shown in console and issue comments
-  evidence: unknown;       // whatever decide() looked at
-}
-```
-
-Each gate has a `collect` step that may run things (pytest, git, the LLM) and returns evidence, and a `decide(evidence, policy)` step that is a pure function. `decide` functions get unit tests with fixtures; `collect` does not.
-
-Any exception inside a gate becomes `unknown` with the error message as the reason. A command that hits its timeout is `unknown`.
-
-### C-GATE-2 Pytest runner
-
-One helper runs pytest with `-q -p no:cacheprovider --junitxml=<runDir>/issue-<n>/junit/<name>.xml` and a timeout of `tests.timeoutSec`. It returns the exit code, stdout, stderr, whether it timed out, and the parsed JUnit (`fast-xml-parser`): each testcase with outcome `passed | failure | error | skipped` and the failure text.
-
-## Per-issue pipeline
-
-### C-ISS-1 Selection
-
-`gh issue list --repo <repo> --label factory --state open --json number,title,body,labels,createdAt --limit 200`, sorted by `createdAt` ascending. Skip issues that carry `factory:in-progress`, `factory:resolved` or `factory:needs-human`. With `--issue`, take only that issue, but still skip it if it has a status label.
-
-### C-ISS-2 Start
-
-Add `factory:in-progress`. On every exit path out of the issue (resolved, escalated, factory error), remove it again. A crash of the factory itself removes the label and exits 1 without escalating; the issue is picked up on the next run.
-
-### C-IN-1 Parse the issue form
-
-The issue body is the markdown GitHub renders from the form: a `### <Label>` heading per field, then the value. Parse it by heading, case-insensitive, into:
-
-```ts
-interface BugReport {
-  number: number;
-  title: string;
-  component: string;
-  description: string;
-  input: Record<string, Scalar>;   // parsed from the Input field
-  expected: Scalar;
-  actual: Scalar;
-}
-type Scalar = number | string | boolean | null;
-```
-
-A missing heading, an empty value or `_No response_` is `unknown` with the field name as the reason.
-
-### C-IN-2 Concrete values (gate `intake`)
-
-- `Input` parses as a JSON object with at least one key, and every value is a scalar.
-- `Expected` and `Actual` each parse as a JSON scalar. Strings must be quoted: `"SAVE10"`, not `SAVE10`.
-- `expected !== actual`.
-- `component` is not in `intake.componentDenylist`.
-
-Any failure is `unknown` (the report is not usable, which is a human's call). This is where N2 stops.
-
-### C-PRE-1 Generate (gate `repro.generate`)
-
-One chat completion on the selected provider (prompt in C-PROMPT-1). Take the first ```` ```python ```` block from the answer. No block, an LLM error or a timeout is `fail` and uses up an attempt. The pipeline, not the LLM, writes the file, so the generator can only ever add this one file (R-PRE-4 holds by construction).
-
-### C-PRE-2 Validate (gate `repro.validate`)
-
-In a fresh repro checkout with the candidate test committed (C-WS-2), run only the new test `repro.runs` times. Each run must:
-
-- exit with code 1 (tests failed; 2, 4 and 5 mean interrupted, usage error or no tests);
-- contain at least one testcase, and every testcase is `failure`, not `error` or `skipped`;
-- have a failure text whose first line starting with `E ` matches `^E\s+(assert\b|AssertionError\b)`. A `TypeError` or `ImportError` is the wrong reason to fail (R-PRE-5).
-
-All runs good: `pass`. All runs bad: `fail`, with the first run's reason, for example "test passed on base" or "fails with TypeError, not an assertion". Mixed: `unknown` (flaky, R-PRE-6). Timeout: `unknown`. This is where N1 stops.
-
-### C-PRE-3 Matches the report (gate `repro.match`)
-
-Pure checks on the test source and the failure text from C-PRE-2 (R-PRE-8):
-
-- **Inputs:** each value in `report.input` appears as a literal in the test source.
-- **Expected:** `report.expected` appears as a literal on a line whose stripped text starts with `assert`.
-- **Actual:** `report.actual` appears as a literal in the `E ` lines of the first failure text.
-- **Hygiene:** the source contains `def test_` and none of `pytest.mark.skip`, `pytest.mark.xfail`, `pytest.skip(`.
-
-Literal matching:
-- Numbers: extract numeric literals with `(?<![\w.])-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?` and compare numerically within `1e-9`, so `0.00`, `0.0` and `0` all match.
-- Strings: `"value"` or `'value'`.
-- `true`, `false`, `null`: `True`, `False`, `None`.
-
-Any check missing is `fail`, naming the check.
-
-### C-PRE-4 Attempts
-
-Up to `repro.attempts` rounds of generate, validate and match. A `fail` starts the next round, and the prompt gets the previous reason. An `unknown` escalates at once. After the last round fails, escalate with the last reason. The fixer never runs.
-
-### C-PRE-5 Lock (gate `repro.lock`)
-
-Keep the test content and its sha256 in memory, write the hash and the full source to the log, and write a copy to `issue-<n>/locked/` for humans. From here on, every workspace gets the test from memory (C-WS-2).
-
-### C-FIX-1 Fixer interface
-
-```ts
-interface FixerInput {
-  workspace: string;        // checkout with the repro commit R at HEAD
-  prompt: string;           // C-PROMPT-2
-  testCommand: string;      // e.g. "<venv>/bin/python -m pytest tests/repro/test_issue_12.py -q"
-  provider: ProviderConfig; // resolved provider entry, incl. API key value
-  model: string;
-}
-
-interface FixerLaunch {
-  cmd: string;
-  args: string[];
-  env: Record<string, string>;  // added to the base env (C-FIX-3)
-}
-
-interface Fixer {
-  name: string;
-  supports(providerName: string): boolean;
-  launch(input: FixerInput): FixerLaunch;
-}
-```
-
-Adapters live in `src/fixers/` and are listed in a registry keyed by name. Adding a fixer is one file and one registry line; the pipeline has no fixer-specific code. At startup, if the chosen fixer does not support the chosen provider, exit 2 with a clear message.
-
-### C-FIX-2 Adapters
-
-| Fixer | Providers | Launch |
-|---|---|---|
-| `omp` | deepseek, nebius | `omp -p --cwd <ws> --model <provider>/<model> --api-key <key> --auto-approve --no-session --no-extensions --no-skills --no-rules --max-time <timeoutSec>s <prompt>`. DeepSeek is a built-in OMP provider (`deepseek/deepseek-v4-pro`). Nebius needs a custom OpenAI-compatible provider in an overlay passed with `--config fixers/omp-nebius.yml`; check the overlay format in the OMP docs when wiring it up. |
-| `claude` | deepseek | `claude -p --output-format json --permission-mode bypassPermissions --max-turns 40 <prompt>`, cwd `<ws>`, env `ANTHROPIC_BASE_URL=<anthropicBaseURL>`, `ANTHROPIC_AUTH_TOKEN=<key>`, `ANTHROPIC_MODEL=<model>`, `ANTHROPIC_SMALL_FAST_MODEL=<model>`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`. Nebius has no Anthropic-compatible endpoint, so `supports("nebius")` is false. |
-| `rogue-edit-test` | any | `node <factory>/dist/fixers/rogue.js edit-test`, cwd `<ws>`. Replaces every `assert` line in `tests/repro/test_issue_<n>.py` with `assert True`, changes nothing else. |
-
-The model is `fixer.model` if set, else the provider's `model`.
-
-### C-FIX-3 Running the fixer (gate `fixer.run`)
-
-- Fresh fixer checkout (C-WS-1, C-WS-2), with `R` recorded before the fixer starts.
-- Base env is only `PATH` (with `<venv>/bin` first), `HOME`, `LANG`, `TERM=dumb`, plus the adapter's env. `GITHUB_TOKEN`, `GH_TOKEN` and the other provider's key are never passed (R-FIX-7).
-- Spawn detached; on `fixer.timeoutSec` kill the whole process group. Write stdout and stderr to `fixer-<k>.log`.
-- After exit: `git add -A`, then `git diff --cached --binary R > fixer-<k>.diff`. Diffing against `R` also captures any commits the fixer made.
-- Timeout: `unknown`. Non-zero exit: `unknown`. Empty diff: `unknown` with reason "fixer made no change". Each escalates at once (R-FIX-3).
-
-### C-POST-1 Apply (gate `post.apply`)
-
-Fresh verify checkout (C-WS-1, C-WS-2). `git apply --check` then `git apply` with the fixer's diff. Does not apply: `fail`.
-
-### C-POST-2 Diff checks (gate `post.diff`)
-
-Evidence comes from `git apply --numstat --summary` on the patch, the patch text, and the file on disk after applying. Checks in this order, first failure wins:
-
-1. **Tests untouched:** no changed path is under `tests/`, or named `test_*.py`, `*_test.py` or `conftest.py` (R-DIFF-2).
-2. **Locked hash:** sha256 of `tests/repro/test_issue_<n>.py` on disk equals the locked hash (R-DIFF-3).
-3. **Protected paths:** no changed path matches `diff.protectedPaths` (picomatch). The reason names the path. This is where N3 should stop.
-4. **Allowed paths:** every changed path matches `diff.allowedPaths`.
-5. **File operations:** no binary files (numstat `-`), no `create mode`, `delete mode`, `rename`, `mode change` or symlink (`120000`) in the summary.
-6. **Size:** at most `maxFiles` files, `maxChangedLines` added plus removed lines, `maxHunks` lines starting with `@@ `.
-7. **No new imports** (if `forbidNewImports`): no added line (`+`, not `+++`) matching `^\+\s*(import\s|from\s+\S+\s+import\s)` or containing `__import__(` or `importlib`.
-
-All pass: `pass`. Otherwise `fail` with the check and the offending path or line.
-
-### C-POST-3 Oracle (gate `post.oracle`)
-
-In the verify checkout:
-
-- the repro test passes in `repro.runs` of `repro.runs` runs (exit 0, every testcase passed);
-- the full suite passes once (exit 0, no failures or errors).
-
-Any failure: `fail`. Timeout: `unknown`.
-
-### C-POST-4 Fixer attempts
-
-Up to `fixer.attempts`. A `fail` from `post.apply`, `post.diff` or `post.oracle` starts a new attempt in a fresh fixer checkout; the prompt gets the previous gate and reason. An `unknown` escalates at once. After the last attempt fails, escalate with the last reason.
-
-### C-MRG-1 Commit
-
-In the verify checkout, squash the repro commit and the fix into one commit on top of the base sha (`git reset --soft <baseSha>`, then commit under the factory identity):
-
-```
-Fix #<n>: <issue title>
-
-Adds the reproducing test tests/repro/test_issue_<n>.py and the fix.
-
-Factory-Run: <runId>
-Fixer: <fixer> (<provider>/<model>)
-Test-SHA256: <hash>
-```
-
-### C-MRG-2 Push (gate `merge`)
-
-1. `git fetch https://github.com/<repo>.git <branch>` and read the remote head.
-2. Remote head equals the base sha: push `HEAD:<branch>` to the GitHub URL. Never force.
-3. Remote head moved (or the push was rejected): make a fresh verify checkout at the new head, add the locked test, apply the same diff, run C-POST-2 and C-POST-3 again, commit as in C-MRG-1 on top of the new head, and push. A conflict or a failed check escalates. A second rejection is `unknown` and escalates.
-
-This also covers `--sha` pointing at an older commit: the diff is re-verified on the current head before it ships (R-MRG-1).
-
-### C-RES-1 Resolve
-
-Comment on the issue, add `factory:resolved`, remove `factory:in-progress`, `gh issue close --reason completed`. Then stop the run and exit 0.
-
-```
-Resolved by the dark factory.
-
-Commit: <commit url>
-Run: <runId> · base <short sha> · fixer <fixer> (<provider>/<model>)
-
-| Gate | Verdict |
-|---|---|
-| intake | pass |
-| repro.validate | pass (failed 3/3 on base with an assertion) |
-| ... | ... |
-```
-
-### C-ESC-1 Escalate
-
-Comment, add `factory:needs-human`, remove `factory:in-progress`, leave the issue open. Never retried automatically (R-ESC-3). Then continue with the next issue.
-
-```
-The dark factory needs a human for this issue.
-
-Stage: <gate>
-Verdict: <fail|unknown>
-Reason: <reason>
-Run: <runId> · base <short sha>
-Evidence: .factory/runs/<runId>/log.jsonl on the factory host
-```
+`llm.provider` (or `--provider`) moves every factory LLM call (triage, test generation, both judges) between DeepSeek and Nebius. Both are called through the `openai` npm package with the provider's `baseURL` and key; no code branches on the provider name. The fixer uses the same provider unless `fixer.provider` is set, and `fixer.model` overrides the provider's model for the fixer only.
 
 ## Prompts
 
-### C-PROMPT-1 Test generator
+All factory LLM calls use `temperature: 0`. JSON answers are requested with `response_format: {type: "json_object"}` where the provider supports it, and parsed with zod; anything that does not parse is `unknown`.
+
+### C-PROMPT-1 Triage
+
+System: "You decide whether a bug report describes a trivial bug: a wrong value returned by the code, with a concrete input, expected value and actual value, that a small change in one source file can fix. Answer JSON {\"trivial\": boolean, \"reason\": string}."
+
+User: the report fields and `git ls-files`.
+
+### C-PROMPT-2 Test generator
 
 System: "You write exactly one pytest test that reproduces a bug report. Answer with one ```python code block and nothing else."
 
-User message, in this order:
+User: the report; `git ls-files`; every file under `src/` (cap 100 KB); the first file under `tests/` outside `tests/repro/` (cap 10 KB); then the rules:
 
-1. The report: title, component, description, input (as JSON), expected, actual.
-2. The repo file list (`git ls-files`).
-3. The content of every file under `src/`, capped at 100 KB in total.
-4. The first file under `tests/` (excluding `tests/repro/`) as a style example, capped at 10 KB.
-5. Rules:
-   - One test function named `test_issue_<n>`, in a file that will be saved as `tests/repro/test_issue_<n>.py`.
-   - Import the code under test the same way the example test does.
-   - Call the code with the input values from the report, written as literals.
-   - The `assert` line compares the result with the expected value written as a literal, for example `assert result == 0.00` or `assert result == pytest.approx(11.96)`.
-   - No mocks of the code under test, no network, no files, no sleeps, no skips.
-   - The test must fail on the current code with an assertion error and pass once the bug is fixed.
-6. If this is a retry: "Your previous test was rejected: <reason>. Write a new one."
+- One test function named `test_issue_<n>`, saved as `tests/repro/test_issue_<n>.py`.
+- Import the code under test the way the example test does.
+- Call the code with the report's input values, written as literals.
+- The `assert` line compares the result with the expected value written as a literal, for example `assert result == 0.00` or `assert result == pytest.approx(11.96)`.
+- No mocks of the code under test, no network, no files, no sleeps, no skips.
+- The test must fail on the current code with an assertion error and pass once the bug is fixed.
 
-### C-PROMPT-2 Fixer
+### C-PROMPT-3 Test judge
+
+System: "You review a reproducing test for a bug report. Reject it if it does not check the reported behaviour with the reported input and expected value, if it asserts something trivially true, or if it tests a side detail. Answer JSON {\"reject\": boolean, \"reason\": string}."
+
+User: the report, the test source, the failure output.
+
+### C-PROMPT-4 Fixer
 
 ```
 Fix bug #<n> in this repository.
@@ -500,35 +402,37 @@ Rules:
 - If the bug cannot be fixed within these rules, stop without changing anything.
 ```
 
-On a retry, append: "Your previous attempt was rejected by <gate>: <reason>."
+### C-PROMPT-5 Fix judge
+
+System: "You review a bug fix. Reject it if it special-cases the test's input values, hardcodes the expected answer, works around configuration or data in code, or changes behaviour unrelated to the report. Answer JSON {\"reject\": boolean, \"reason\": string}."
+
+User: the report, the locked test, the diff.
 
 ## Evidence log
 
 ### C-LOG-1 Entries
 
-`.factory/runs/<runId>/log.jsonl`, one JSON object per line, appended and flushed per entry:
+`.factory/runs/<runId>/log.jsonl`, one JSON object per line, flushed per entry:
 
 ```json
 {"ts": "...", "runId": "...", "repo": "owner/name", "baseSha": "...", "issue": 12,
- "gate": "repro.validate", "attempt": 1, "verdict": "fail", "reason": "...",
+ "step": "post", "check": "diff", "verdict": "fail", "reason": "...",
  "evidence": { }, "policySha256": "..."}
 ```
 
-- Logged: setup (base sha, branch, fixer, provider, model), every gate result, the full repro test source and hash at lock, the full fixer diff, the commit sha and push result, every GitHub write.
-- Long text (stdout, stderr) is cut to its last 20 KB in the log; full output stays in the files under `issue-<n>/`.
-- If writing an entry fails, the run stops with exit 1 (R-AUD-7).
+Logged: setup (base sha, branch, fixer, provider, model); every check and judge with its evidence (judges: full prompt and answer); the test source and hash; the fixer diff; every push and GitHub write. Long output is cut to the last 20 KB in the log; full output stays in files under `issue-<n>/`. If an entry cannot be written, exit 1 (R-AUD-7).
 
 ## Target repo
 
-The full spec is in [target-repo.md](target-repo.md). For this build, only these parts are needed.
+Full spec in [target-repo.md](target-repo.md); only these parts are needed.
 
 ### C-TGT-1 Code and suite
 
-R-TR-1, R-TR-2 and R-TR-4: the shop pricing service in `src/`, about 30 green tests in `tests/` that miss every seeded bug, an empty `tests/repro/` (with a `.gitkeep`), `config/shipping_rates.yaml`. No Dockerfile, router or deploy needed.
+R-TR-1, R-TR-2, R-TR-4: the shop pricing service in `src/`, about 30 green tests in `tests/` that miss every seeded bug, an empty `tests/repro/` (with `.gitkeep`), `config/shipping_rates.yaml`. No Dockerfile or production simulation.
 
 ### C-TGT-2 Issue form
 
-`.github/ISSUE_TEMPLATE/bug.yml` with label `factory` and these fields, whose labels are the headings the parser reads:
+`.github/ISSUE_TEMPLATE/bug.yml`, label `factory`. Field labels are the headings the parser reads:
 
 | Label | Type | Notes |
 |---|---|---|
@@ -540,34 +444,30 @@ R-TR-1, R-TR-2 and R-TR-4: the shop pricing service in `src/`, about 30 green te
 
 ### C-TGT-3 Pytest config
 
-`pyproject.toml` sets `[tool.pytest.ini_options] pythonpath = ["src"]` and `testpaths = ["tests"]`. `.gitignore` covers `__pycache__/`, `.pytest_cache/` and `*.pyc`.
+`pyproject.toml`: `[tool.pytest.ini_options] pythonpath = ["src"]`, `testpaths = ["tests"]`. `.gitignore` covers `__pycache__/`, `.pytest_cache/`, `*.pyc`.
 
 ### C-TGT-4 Seeded issues
 
-Issue files live in the factory repo under `seed/issues/` (one markdown file per issue, in the rendered form format), filed with `gh issue create --label factory --body-file`. Seed order, which is also processing order:
+One markdown file per issue in the factory repo under `seed/issues/`, in the rendered form format, filed with `gh issue create --label factory --body-file`. Seed order is processing order:
 
-| Order | Id | Input | Expected | Actual | Intended outcome |
+| Order | Id | Input | Expected | Actual | Expected outcome |
 |---|---|---|---|---|---|
-| 1 | N2 | not JSON: "a big order" | "the correct total" (unquoted) | "a wrong total" (unquoted) | `intake` |
-| 2 | T1 | `{"cart_total": 50.00, "country": "DE"}` | `0.00` | `4.99` | resolved |
-| 3 | N1 | `{"sku": "LAMP", "reservations": 2}` | `0` | `-1` | `repro.validate` |
-| 4 | T2 | `{"amount": 10.05, "vat_rate": 0.19}` | `11.96` | `11.95` | resolved |
-| 5 | N3 | `{"cart_total": 20.00, "country": "AT"}` | `5.00` | `15.00` | `post.diff`, protected path |
-| 6 | T3 | `{"code": "save10", "amount": 100.00}` | `90.00` | `100.00` | resolved |
-| 7 | T4 | `{"price": 12.50}` | `12.50` | `0.00` | resolved |
-| 8 | T5 | `{"price": 100.00, "code": "SAVE10"}` | `90.00` | `81.00` | resolved |
+| 1 | N2 | not JSON: "a big order" | "the correct total" (unquoted) | "a wrong total" (unquoted) | human, step 2 form checks |
+| 2 | T1 | `{"cart_total": 50.00, "country": "DE"}` | `0.00` | `4.99` | merged |
+| 3 | N1 | `{"sku": "LAMP", "reservations": 2}` | `0` | `-1` | human, step 2 triage or step 3 test checks |
+| 4 | T2 | `{"amount": 10.05, "vat_rate": 0.19}` | `11.96` | `11.95` | merged |
+| 5 | N3 | `{"cart_total": 20.00, "country": "AT"}` | `5.00` | `15.00` | human, step 5 protected path or fix judge |
+| 6 | T3 | `{"code": "save10", "amount": 100.00}` | `90.00` | `100.00` | merged |
+| 7 | T4 | `{"price": 12.50}` | `12.50` | `0.00` | merged |
+| 8 | T5 | `{"price": 100.00, "code": "SAVE10"}` | `90.00` | `81.00` | merged |
 
-With this order, run 1 escalates N2 and resolves T1, run 2 escalates N1 and resolves T2, and so on.
-
-### C-TGT-5 Reset (should)
-
-`factory reset --repo <owner/name>` for rehearsals: refuses any repo other than `demoRepo` in the policy; force-pushes the default branch to the `seed` tag; closes all open issues; re-files `seed/issues/`. This is destructive by design.
+Each run hands one N issue to a human and merges the next T issue, so every run shows both paths.
 
 ## Implementation
 
 ### C-IMP-1 Stack
 
-Node 22, TypeScript, ESM, run with `tsx` during development and `tsc` for `dist/`. Dependencies: `commander`, `execa`, `openai`, `fast-xml-parser`, `picomatch`, `zod`; `vitest` for tests. `package.json` `bin` maps `factory` to `dist/cli.js`.
+Node 22, TypeScript, ESM; `tsx` in development, `tsc` to `dist/`. Dependencies: `commander`, `execa`, `openai`, `fast-xml-parser`, `picomatch`, `zod`; `vitest` for tests. `bin`: `factory` → `dist/cli.js`.
 
 ### C-IMP-2 Layout
 
@@ -576,58 +476,56 @@ factory.policy.json
 seed/issues/*.md
 fixers/omp-nebius.yml
 src/
-  cli.ts              argument parsing, exit codes
-  config.ts           policy load + zod schema + hash, env checks
-  log.ts              JSONL evidence log
-  exec.ts             execa wrapper: timeout, process-group kill, {code, stdout, stderr, timedOut, ms}
-  github.ts           gh wrappers: list issues, comment, labels, close (dry-run aware)
-  git.ts              clone, checkout, commit, diff, apply, fetch, push
-  workspace.ts        C-WS-1..3
-  pytest.ts           run pytest + parse JUnit (C-GATE-2)
-  llm.ts              OpenAI-compatible client from provider config
-  report.ts           issue body parser (C-IN-1)
-  literals.ts         literal matching shared by repro.match
-  gates/
-    intake.ts
-    repro.ts          generate, validate, match, lock
-    diff.ts
-    oracle.ts
+  cli.ts          arguments, exit codes, the step 2–6 loop
+  config.ts       policy + zod schema + hash, env checks
+  log.ts          JSONL evidence log
+  exec.ts         execa wrapper: timeout, process-group kill
+  github.ts       gh wrappers (dry-run aware)
+  git.ts          clone, branch, commit, diff, apply, fetch, push, rebase
+  pytest.ts       run pytest, parse JUnit
+  llm.ts          OpenAI-compatible client, JSON answers
+  report.ts       issue form parser
+  literals.ts     literal matching
+  steps/
+    find.ts       form checks + triage
+    test.ts       generate, commit, checks, judge, lock, push
+    fix.ts        run fixer, take diff
+    post.ts       apply, diff checks, tests, judge
+    merge.ts      merge, resolve, comment for human
   fixers/
-    index.ts          registry
+    index.ts      registry
     omp.ts
     claude.ts
     rogue.ts
-  pipeline.ts         per-issue state machine, attempts, escalate/resolve
 test/
-  *.test.ts           decide() functions, report parser, literal matching
+  *.test.ts       report parser, literals, diff checks
 ```
 
 ### C-IMP-3 Build order
 
-Each step ends with something runnable.
+Each step ends with something you can run.
 
-1. **Smoke tests by hand.** `omp -p --model deepseek/deepseek-v4-pro "say hi"`, the same through Claude Code against the DeepSeek Anthropic endpoint, and one chat completion against DeepSeek with the `openai` package. Fix adapter flags now, not later.
-2. **Target repo.** Code, suite, issue form, pytest config, seed files, seeding script.
-3. **Skeleton.** `cli.ts`, `config.ts`, `log.ts`, `exec.ts`, `github.ts`, run setup (C-RUN-*), issue loop, intake and escalation. Demo: N2 escalates.
-4. **Repro.** Generate, validate, match, lock. Demo: N1 escalates; T1 gets a locked test.
-5. **Fixer.** Registry, `omp` adapter, diff capture.
-6. **Post-checks and merge.** Apply, diff, oracle, commit, push, resolve. Demo: T1 resolved end to end; N3 escalates.
-7. **Rogue and Claude.** `rogue-edit-test` (stopped by `post.diff` tests untouched), `claude` adapter. Demo: `--issue <T> --fixer rogue-edit-test` escalates; `--fixer claude` resolves a T issue.
-8. **If time:** Nebius provider and OMP overlay, `factory reset`, unit tests for `decide` functions.
+1. **Smoke tests by hand:** `omp -p --model deepseek/deepseek-v4-pro "say hi"`; Claude Code against the DeepSeek Anthropic endpoint; one `openai` chat completion against DeepSeek.
+2. **Target repo:** code, suite, issue form, pytest config, seed files, seeding script.
+3. **Steps 1–2:** setup, issue loop, form checks, triage, comment for human. Demo: N2 goes to a human.
+4. **Step 3:** branch, test generation, checks, judge, push. Demo: N1 goes to a human; T1 gets a branch with a red test.
+5. **Steps 4–6 with `omp`:** demo: T1 merged end to end; N3 goes to a human.
+6. **`rogue-edit-test` and `claude`:** demo: the rogue fixer is stopped at "tests untouched"; Claude Code merges a T issue.
+7. **If time:** Nebius provider and OMP overlay; a reset script for rehearsals (force-push `main` back to a `seed` tag, close issues, re-file `seed/issues/`, refusing any repo but the demo repo); unit tests.
 
 ## Acceptance
 
-- **A-1** Starting from the seeded state, repeated `factory run --repo <demo>` resolves T1–T5, one per run. Each leaves one commit on `main` containing `tests/repro/test_issue_<n>.py` and a change under `src/`, a resolve comment, the `factory:resolved` label and a closed issue.
-- **A-2** N2 is escalated at `intake`, N1 at `repro.validate`, N3 at `post.diff`. The fixer never runs for N1 or N2. Nothing from them reaches `main`.
-- **A-3** `--fixer rogue-edit-test --issue <T>` is escalated at `post.diff` with reason "tests untouched".
-- **A-4** Once every seeded issue is resolved or escalated, `factory run` exits 3 without touching GitHub.
-- **A-5** Each run's `log.jsonl` has an entry for every gate that ran, and the locked test hash in the log matches the test committed to `main`.
-- **A-6** Switching `--fixer omp` to `--fixer claude` and `--provider deepseek` to `--provider nebius` (for the factory's own LLM calls) needs no code change.
+- **A-1** From the seeded state, repeated `factory run --repo <demo>` merges T1–T5, one per run. Each merge adds a test commit and a fix commit to `main`, and the issue is commented, labelled `factory:resolved` and closed.
+- **A-2** N1, N2 and N3 each get a comment for a human and `factory:needs-human`. Nothing from them reaches `main`. The fixer never runs for N1 or N2.
+- **A-3** `--fixer rogue-edit-test --issue <T>` goes to a human at "tests untouched".
+- **A-4** With nothing left to process, `factory run` exits 3 without touching GitHub.
+- **A-5** The log has an entry for every check and judge that ran, and the locked test hash matches the test on `main`.
+- **A-6** Switching fixer (`omp` ↔ `claude`) or provider (`deepseek` ↔ `nebius`) needs no code change.
 
 ## Known limits
 
-- No sandbox: the fixer runs as the local user and can read anything that user can, including `gh` credentials under `HOME`. Only its diff is checked. Acceptable for the demo; say so openly.
-- N1 may stop somewhere else if the LLM manages to write a multi-process test that reproduces the race. If rehearsal shows that, add `inventory` to `intake.componentDenylist`.
-- N3 ships if the fixer hardcodes `if country == "AT"` in code rather than editing the protected config. The fixer prompt forbids special-casing, but nothing deterministic enforces it; the LLM diff veto (R-DIFF-9) is the full version's answer. Rehearse it.
-- A fixer can special-case the test's exact input in general; see the holdout test under "Later" in the full requirements.
-- The import check is line-based and specific to Python.
+- No sandbox: the fixer runs as the local user and can read what that user can, including `gh` credentials under `HOME`. Only its diff is used.
+- One attempt per issue: a fixer that is merely unlucky sends a trivial bug to a human.
+- N3 depends on the fix judge if the fixer hardcodes the country in code. An LLM judge can miss it; rehearse.
+- A fixer can special-case the test's exact input; only the fix judge looks for that.
+- The import check is line-based and Python-specific.
