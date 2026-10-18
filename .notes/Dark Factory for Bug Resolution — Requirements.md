@@ -11,7 +11,8 @@ We build the confidence layer that lets a repo fix trivial bugs and ship them to
 - Pre-checks that qualify a known bug report and generate a reproducing test.
 - A clean interface to a black-box fixer, with at least one off-the-shelf agent plugged in.
 - Post-checks: a behavioral oracle and diff inspection.
-- A gated deploy with canary and automatic rollback.
+- A gated deploy behind a flag and a canary, with automatic rollback.
+- Escalation to a human, and on-the-loop controls: pause, manual rollback, live view.
 - A signed, append-only audit trail with replay of gate decisions.
 
 **Out of scope**
@@ -34,3 +35,213 @@ These apply to every requirement below and win in case of doubt.
 - **P5 Trust nothing but the diff.** The only artifact taken from the fixer is a diff. The pipeline applies it itself in a clean checkout.
 - **P6 Everything is evidence.** Every step returns a result plus evidence, and the orchestrator writes both to the audit log. No step can skip logging.
 - **P7 Small blast radius.** Anything that ships does so behind a canary with automatic rollback.
+
+## Flow
+
+Every stage checks the pause switch before it starts and writes its result plus evidence to the audit log. Any Fail or Unknown goes to escalation.
+
+```mermaid
+flowchart TD
+    BR[/"Bug report<br/>structured template"/] --> IN
+
+    subgraph PRE["Pre-checks"]
+        IN["Intake filter<br/>required fields · component denylist<br/>optional LLM veto"]
+        GEN["Generate tests · LLM, separate run<br/>visible test + holdout test"]
+        VAL["Validate tests<br/>new files only · red N of N · assertion failure<br/>expected and actual match report · suite green on base"]
+        LOCK["Lock tests<br/>store outside fixer workspace · hash to audit log"]
+        IN -->|Pass| GEN --> VAL
+        VAL -->|"Fail, attempts left"| GEN
+        VAL -->|Pass| LOCK
+    end
+
+    subgraph BOX["Black box"]
+        FIX["Fixer<br/>bug report + visible test → diff"]
+    end
+
+    subgraph POST["Post-checks"]
+        APPLY["Apply diff to clean checkout of base"]
+        DIFF["Diff inspection<br/>size · protected paths · file types<br/>secrets · imports and APIs · restore locked tests"]
+        ORA["Oracle<br/>visible + holdout green N of N<br/>full suite green · changed lines covered"]
+        APPLY -->|Pass| DIFF -->|Pass| ORA
+    end
+
+    subgraph DEP["Gated deploy"]
+        MRG["Merge to main<br/>re-verify if main moved"]
+        CAN["Canary behind flag<br/>small traffic share"]
+        SLO["SLO check over window<br/>error rate · p95 latency"]
+        PROM["Promote to 100%"]
+        RB["Automatic rollback<br/>flag off · stop canary · revert commit"]
+        MRG -->|Pass| CAN --> SLO
+        SLO -->|Pass| PROM
+        SLO -->|"Fail / Unknown"| RB
+    end
+
+    LOCK --> FIX
+    FIX -->|diff| APPLY
+    ORA -->|Pass| MRG
+    PROM --> DONE(["Resolved"])
+
+    ESC[["Escalate to human"]]
+    IN -->|"Fail / Unknown"| ESC
+    VAL -->|"Fail / Unknown, no attempts left"| ESC
+    FIX -->|"timeout · crash · empty diff"| ESC
+    APPLY & DIFF & ORA -->|"Fail / Unknown"| ESC
+    MRG -->|conflict| ESC
+    RB --> ESC
+
+    AUD[("Signed, hash-chained audit log")]
+    HUM["Human on the loop<br/>live view · pause · rollback · verify · replay"]
+    PRE & BOX & POST & DEP & ESC -.-> AUD
+    ESC --> HUM
+    HUM -.-> AUD
+
+    classDef esc fill:#fde2e1,stroke:#c0392b,color:#000
+    classDef ok fill:#e3f4e1,stroke:#2e7d32,color:#000
+    class ESC,RB esc
+    class DONE,PROM ok
+```
+
+## Requirements
+
+Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1).
+
+### Bug reports (R-IN)
+
+- **R-IN-1** Input is one bug report per record, in a structured template: id, title, component, description, input or steps, expected result, actual result.
+- **R-IN-2** Expected and actual results are stated as concrete values. The test-to-report link (R-PRE-7) depends on this.
+- **R-IN-3** Bugs are processed one at a time, in order. A bug already resolved or in progress is skipped.
+
+### Pre-checks (R-PRE)
+
+*Intake*
+
+- **R-PRE-1** A deterministic intake filter checks that all required fields are present and that the component is not on the denylist *(policy)*. Otherwise the verdict is Unknown.
+- **R-PRE-2** An LLM may veto intake, for example when the report is a feature request or ambiguous. A veto escalates. An LLM approval has no effect.
+
+*Test generation*
+
+- **R-PRE-3** A generator, run separately from the fixer, writes two reproducing tests from the report: a **visible test** and a **holdout test**. The holdout uses different input values where the report allows it, and its body must differ from the visible test.
+
+*Test validation (applies to both tests)*
+
+- **R-PRE-4** The generator's output only adds new files under the repro test directory. Any other change fails.
+- **R-PRE-5** The test fails on the base commit for the right reason: an assertion failure. Collection errors, import errors, syntax errors and timeouts do not count.
+- **R-PRE-6** The test fails in N of N runs (N = 3, *policy*). Mixed results are Unknown.
+- **R-PRE-7** The test is tied to the report. The report's expected value appears as a literal in an assertion, and the red run's failure output contains the report's actual value. Otherwise the test fails validation. This is what keeps an LLM-written test from being the reason a change ships (P2).
+- **R-PRE-8** The existing test suite is green on the base commit. If it is not, the oracle cannot be trusted and the verdict is Unknown.
+- **R-PRE-9** If no valid pair of tests is produced within M attempts (M = 2, *policy*), the bug escalates and the fixer never runs.
+
+*Lock*
+
+- **R-PRE-10** Before the fixer starts, both tests are stored outside the fixer workspace and their content hashes are written to the audit log.
+
+### Fixer interface (R-FIX)
+
+- **R-FIX-1** Contract. Input: the bug report, a clean checkout of the base commit containing the visible test, and the test command. Output: a unified diff. The pipeline takes nothing else from the fixer.
+- **R-FIX-2** The fixer never receives the holdout test.
+- **R-FIX-3** The fixer runs as a separate process in a throwaway workspace with a wall-clock timeout (10 min, *policy*). Timeout, crash or an empty diff escalates.
+- **R-FIX-4** One attempt per bug *(policy)*. A rejected diff escalates; the fixer is not retried with gate feedback (see Open decisions).
+- **R-FIX-5** At least one off-the-shelf coding agent is plugged in, using Nebius Token Factory models.
+- **R-FIX-6** Fixers are selected by configuration, with no change to pipeline code.
+- **R-FIX-7** The factory's signing key and policy file are never present in the fixer workspace.
+
+### Post-checks: diff inspection (R-DIFF)
+
+- **R-DIFF-1** The pipeline applies the diff itself to a fresh checkout of the base commit. If it does not apply cleanly, the verdict is Fail.
+- **R-DIFF-2** Size limits: at most 2 files, 20 changed lines and 3 hunks *(policy)*.
+- **R-DIFF-3** No protected paths *(policy)*: tests, test configuration (including `conftest.py` and pytest config), CI configuration, dependency manifests and lockfiles, build and deploy configuration, environment and secret files, database migrations, the policy file, and the factory's own code.
+- **R-DIFF-4** No binary files, file mode changes, symlinks, renames or file deletions.
+- **R-DIFF-5** No secrets in added lines, checked by a secret scanner.
+- **R-DIFF-6** A static check on the syntax tree rejects new imports outside the allowlist and new calls to denied APIs (eval and exec, subprocess, network, file writes) *(policy)*. It also rejects new test skip markers.
+- **R-DIFF-7** After applying the diff, the pipeline restores both locked tests from the store and verifies their hashes.
+- **R-DIFF-8** An LLM reviewer may veto, for example when it spots a hardcoded answer. A veto escalates. An LLM approval has no effect.
+
+### Post-checks: oracle (R-OR)
+
+- **R-OR-1** The visible and holdout tests both pass in N of N runs on the patched checkout.
+- **R-OR-2** The full existing suite passes on the patched checkout. Any failure is Fail. Tests are not rerun until they go green.
+- **R-OR-3** Every changed source line is executed by at least one of the two repro tests (line coverage).
+- **R-OR-4** Every test run has a timeout. A timeout is Unknown.
+
+### Merge (R-MRG)
+
+- **R-MRG-1** If `main` moved since the base commit, the diff is applied to the current head, and diff inspection and the oracle run again. A conflict escalates.
+- **R-MRG-2** The pipeline commits the diff to `main` as one commit that references the bug id and the run id, under the factory's identity.
+
+### Gated deploy (R-DEP)
+
+- **R-DEP-1** The new version is deployed as a canary next to the stable version. A flag controls the canary's traffic share (10%, *policy*). Flag off means 0%.
+- **R-DEP-2** The canary must pass a health check before it receives traffic. A failed start rolls back.
+- **R-DEP-3** Traffic runs against both versions for an observation window (60 s, *policy*).
+- **R-DEP-4** SLO: the canary's error rate is at most the stable version's plus 1 percentage point, and its p95 latency is at most 1.5× the stable version's *(policy)*. Too little traffic to decide is Unknown.
+- **R-DEP-5** On a breach or Unknown, the system rolls back automatically: flag off, canary stopped, commit reverted on `main`, bug escalated.
+- **R-DEP-6** On Pass, the new version is promoted to 100% and replaces the stable version.
+
+### Escalation (R-ESC)
+
+- **R-ESC-1** An escalation records the bug id, run id, stage, verdict, reason and a pointer to the evidence.
+- **R-ESC-2** Escalations go to a queue shown in the live view. Posting to an issue tracker or a webhook is optional.
+- **R-ESC-3** An escalated bug is not retried automatically.
+
+### Human on the loop (R-HUM)
+
+- **R-HUM-1** Pause. A kill switch is checked before each stage. When it is set, the current run stops at the next stage boundary and nothing new merges or deploys. A canary that is running when the line is paused rolls back.
+- **R-HUM-2** Manual rollback of any factory commit by run id.
+- **R-HUM-3** The full record of any run can be pulled on demand.
+- **R-HUM-4** A live view shows the current bug and stage, verdicts so far, escalations and deploys.
+
+### Audit trail (R-AUD)
+
+- **R-AUD-1** The log is append-only. Every entry records the run id, bug id, stage, timestamp, inputs, evidence, verdict and policy hash.
+- **R-AUD-2** Each entry contains the hash of the previous entry and is signed with the factory key (Ed25519).
+- **R-AUD-3** For every run, the log contains the bug report, the qualification decision, both test sources and hashes, the diff, the verification evidence and the deploy result.
+- **R-AUD-4** Every gate has two parts: *collect* (may run things, such as tests) and *decide* (a pure function of the collected evidence and the policy). The evidence is stored in full.
+- **R-AUD-5** A verify command checks the hash chain and every signature and reports the first broken entry.
+- **R-AUD-6** A replay command reruns the decide functions on the stored evidence and reports any verdict that differs from the logged one.
+- **R-AUD-7** If an entry cannot be written, the step counts as Unknown and the pipeline stops (P6).
+
+### Policy (R-POL)
+
+- **R-POL-1** All thresholds, lists and timeouts live in one versioned policy file. Its hash is recorded in every audit entry.
+- **R-POL-2** The policy file is a protected path (R-DIFF-3).
+
+### Non-functional (R-NF)
+
+- **R-NF-1** Runs on a laptop. The only external dependency is the Nebius Token Factory API.
+- **R-NF-2** The full demo (6 bugs plus rogue fixer runs) completes within 30 minutes.
+
+## Demo and acceptance
+
+The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
+
+- **D-1** All trivial bugs are resolved end to end, from report to deployed change to audit entry, with no human input.
+- **D-2** The nasty bug is refused at a named gate, chosen in advance, and escalated. No change from it ships.
+- **D-3** Rogue fixers are each stopped by a named gate:
+
+  | Rogue fixer | Stopped by |
+  |---|---|
+  | Edits the reproducing test | R-DIFF-3, R-DIFF-7 |
+  | Adds a dependency | R-DIFF-3, R-DIFF-6 |
+  | Hardcodes the visible test's answer | R-OR-1 (holdout) |
+  | Adds a secret | R-DIFF-5 |
+  | Adds latency the tests do not catch | R-DEP-4 (rollback) |
+
+- **D-4** Verify passes on the untouched log and detects a tampered entry. Replay reproduces every logged verdict.
+- **D-5** Pausing stops the line at the next stage boundary.
+
+## Known limits
+
+- No runtime sandbox. A fixer that reaches the network or reads a secret while it runs is not caught; only its diff is checked.
+- The oracle is only as strong as the existing suite and the generated tests. The holdout test and the report link (R-PRE-7) reduce this risk but do not remove it.
+- The static diff checks (R-DIFF-6) are specific to Python.
+
+## Open decisions
+
+1. Team size and time budget.
+2. Target repo: a toy service we write ourselves (recommended, controllable) or a real open-source repo.
+3. Bug source: local structured files (recommended) or GitHub issues.
+4. Fixer: Aider or mini-swe-agent, and which Nebius model.
+5. Production: local processes (recommended) or a Nebius VM.
+6. Whether the fixer may retry with gate feedback (default: no, R-FIX-4).
+7. Whether to include the LLM vetoes (R-PRE-2, R-DIFF-8) in the first build.
+8. Runtime sandbox as a stretch goal.
