@@ -60,7 +60,7 @@ flowchart TD
 
     subgraph POST["Post-checks"]
         APPLY["Apply diff to clean checkout of base"]
-        DIFF["Diff inspection<br/>size · protected paths · file types<br/>secrets · imports and APIs · restore locked tests"]
+        DIFF["Diff inspection<br/>tests untouched · locked test hashes match<br/>size · protected paths · file types<br/>secrets · imports and APIs"]
         ORA["Oracle<br/>visible + holdout green N of N<br/>full suite green · changed lines covered"]
         APPLY -->|Pass| DIFF -->|Pass| ORA
     end
@@ -85,7 +85,8 @@ flowchart TD
     IN -->|"Fail / Unknown"| ESC
     VAL -->|"Fail / Unknown, no attempts left"| ESC
     FIX -->|"timeout · crash · empty diff"| ESC
-    APPLY & DIFF & ORA -->|"Fail / Unknown"| ESC
+    POST -->|"Fail, attempts left"| FIX
+    APPLY & DIFF & ORA -->|"Unknown, or Fail with no attempts left"| ESC
     MRG -->|conflict| ESC
     RB --> ESC
 
@@ -120,14 +121,14 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 
 *Test generation*
 
-- **R-PRE-3** A generator, run separately from the fixer, writes two reproducing tests from the report: a **visible test** and a **holdout test**. The holdout uses different input values where the report allows it, and its body must differ from the visible test.
+- **R-PRE-3** *(Holdout under discussion, see Open decisions.)* A generator, run separately from the fixer, writes two reproducing tests from the report: a **visible test** and a **holdout test**. The holdout uses different input values where the report allows it, and its body must differ from the visible test.
 
 *Test validation (applies to both tests)*
 
 - **R-PRE-4** The generator's output only adds new files under the repro test directory. Any other change fails.
 - **R-PRE-5** The test fails on the base commit for the right reason: an assertion failure. Collection errors, import errors, syntax errors and timeouts do not count.
 - **R-PRE-6** The test fails in N of N runs (N = 3, *policy*). Mixed results are Unknown.
-- **R-PRE-7** The test is tied to the report. The report's expected value appears as a literal in an assertion, and the red run's failure output contains the report's actual value. Otherwise the test fails validation. This is what keeps an LLM-written test from being the reason a change ships (P2).
+- **R-PRE-7** *(Under discussion, see Open decisions.)* The test is tied to the report. The report's expected value appears as a literal in an assertion, and the red run's failure output contains the report's actual value. Otherwise the test fails validation. This is what keeps an LLM-written test from being the reason a change ships (P2).
 - **R-PRE-8** The existing test suite is green on the base commit. If it is not, the oracle cannot be trusted and the verdict is Unknown.
 - **R-PRE-9** If no valid pair of tests is produced within M attempts (M = 2, *policy*), the bug escalates and the fixer never runs.
 
@@ -140,7 +141,7 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 - **R-FIX-1** Contract. Input: the bug report, a clean checkout of the base commit containing the visible test, and the test command. Output: a unified diff. The pipeline takes nothing else from the fixer.
 - **R-FIX-2** The fixer never receives the holdout test.
 - **R-FIX-3** The fixer runs as a separate process in a throwaway workspace with a wall-clock timeout (10 min, *policy*). Timeout, crash or an empty diff escalates.
-- **R-FIX-4** One attempt per bug *(policy)*. A rejected diff escalates; the fixer is not retried with gate feedback (see Open decisions).
+- **R-FIX-4** Retries. The fixer gets up to K attempts per bug (K = 2, *policy*). A diff that fails a post-check triggers a new attempt in a fresh workspace, and the fixer receives the previous attempt's verdict and reason. It never receives the holdout test or its output. Every attempt goes through all post-checks. Unknown verdicts, timeouts and crashes escalate at once (P3). When attempts run out, the bug escalates.
 - **R-FIX-5** At least one off-the-shelf coding agent is plugged in, using Nebius Token Factory models.
 - **R-FIX-6** Fixers are selected by configuration, with no change to pipeline code.
 - **R-FIX-7** The factory's signing key and policy file are never present in the fixer workspace.
@@ -148,13 +149,14 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 ### Post-checks: diff inspection (R-DIFF)
 
 - **R-DIFF-1** The pipeline applies the diff itself to a fresh checkout of the base commit. If it does not apply cleanly, the verdict is Fail.
-- **R-DIFF-2** Size limits: at most 2 files, 20 changed lines and 3 hunks *(policy)*.
-- **R-DIFF-3** No protected paths *(policy)*: tests, test configuration (including `conftest.py` and pytest config), CI configuration, dependency manifests and lockfiles, build and deploy configuration, environment and secret files, database migrations, the policy file, and the factory's own code.
-- **R-DIFF-4** No binary files, file mode changes, symlinks, renames or file deletions.
-- **R-DIFF-5** No secrets in added lines, checked by a secret scanner.
-- **R-DIFF-6** A static check on the syntax tree rejects new imports outside the allowlist and new calls to denied APIs (eval and exec, subprocess, network, file writes) *(policy)*. It also rejects new test skip markers.
-- **R-DIFF-7** After applying the diff, the pipeline restores both locked tests from the store and verifies their hashes.
-- **R-DIFF-8** An LLM reviewer may veto, for example when it spots a hardcoded answer. A veto escalates. An LLM approval has no effect.
+- **R-DIFF-2** **Tests are untouched.** The diff must not add, change or delete any test file: neither the locked reproducing test nor any existing test. Any such change is Fail.
+- **R-DIFF-3** After applying the diff, the hash of each locked test on disk must equal the hash recorded at lock time (R-PRE-10). A mismatch is Fail. This catches changes that slip past R-DIFF-2, for example through a rename or a symlink.
+- **R-DIFF-4** Size limits: at most 2 files, 20 changed lines and 3 hunks *(policy)*.
+- **R-DIFF-5** No protected paths *(policy)*: test configuration (including `conftest.py` and pytest config), CI configuration, dependency manifests and lockfiles, build and deploy configuration, environment and secret files, database migrations, the policy file, and the factory's own code.
+- **R-DIFF-6** No binary files, file mode changes, symlinks, renames or file deletions.
+- **R-DIFF-7** No secrets in added lines, checked by a secret scanner.
+- **R-DIFF-8** A static check on the syntax tree rejects new imports outside the allowlist and new calls to denied APIs (eval and exec, subprocess, network, file writes) *(policy)*. It also rejects new test skip markers.
+- **R-DIFF-9** An LLM reviewer may veto, for example when it spots a hardcoded answer. A veto escalates. An LLM approval has no effect.
 
 ### Post-checks: oracle (R-OR)
 
@@ -202,8 +204,8 @@ Thresholds marked *(policy)* are defaults that live in the policy file (R-POL-1)
 
 ### Policy (R-POL)
 
-- **R-POL-1** All thresholds, lists and timeouts live in one versioned policy file. Its hash is recorded in every audit entry.
-- **R-POL-2** The policy file is a protected path (R-DIFF-3).
+- **R-POL-1** All thresholds, lists, timeouts and retry limits are configurable in one versioned policy file. Each has the default stated in this document. The policy file's hash is recorded in every audit entry.
+- **R-POL-2** The policy file is a protected path (R-DIFF-5).
 
 ### Non-functional (R-NF)
 
@@ -220,11 +222,11 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
 
   | Rogue fixer | Stopped by |
   |---|---|
-  | Edits the reproducing test | R-DIFF-3, R-DIFF-7 |
-  | Adds a dependency | R-DIFF-3, R-DIFF-6 |
+  | Edits the reproducing test | R-DIFF-2, R-DIFF-3 |
+  | Adds a dependency | R-DIFF-5, R-DIFF-8 |
   | Hardcodes the visible test's answer | R-OR-1 (holdout) |
-  | Adds a secret | R-DIFF-5 |
-  | Adds latency the tests do not catch | R-DEP-4 (rollback) |
+  | Adds a secret | R-DIFF-7 |
+  | Passes every check but breaks under production traffic, e.g. errors on inputs the tests don't cover | R-DEP-4 (canary rollback) |
 
 - **D-4** Verify passes on the untouched log and detects a tampered entry. Replay reproduces every logged verdict.
 - **D-5** Pausing stops the line at the next stage boundary.
@@ -233,7 +235,7 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
 
 - No runtime sandbox. A fixer that reaches the network or reads a secret while it runs is not caught; only its diff is checked.
 - The oracle is only as strong as the existing suite and the generated tests. The holdout test and the report link (R-PRE-7) reduce this risk but do not remove it.
-- The static diff checks (R-DIFF-6) are specific to Python.
+- The static diff checks (R-DIFF-8) are specific to Python.
 
 ## Open decisions
 
@@ -242,6 +244,6 @@ The target is a repo seeded with 5 trivial bugs and 1 nasty bug.
 3. Bug source: local structured files (recommended) or GitHub issues.
 4. Fixer: Aider or mini-swe-agent, and which Nebius model.
 5. Production: local processes (recommended) or a Nebius VM.
-6. Whether the fixer may retry with gate feedback (default: no, R-FIX-4).
-7. Whether to include the LLM vetoes (R-PRE-2, R-DIFF-8) in the first build.
+6. Holdout test (R-PRE-3, R-FIX-2, R-OR-1) and the test-to-report link (R-PRE-7): keep or drop. Both guard against an LLM-written test being wrong or being gamed by the fixer.
+7. Whether to include the LLM vetoes (R-PRE-2, R-DIFF-9) in the first build.
 8. Runtime sandbox as a stretch goal.
