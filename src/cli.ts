@@ -117,7 +117,8 @@ async function setup(opts: RunOptions): Promise<RunContext> {
 
 type IssueOutcome =
   | { merged: true; issue: number; commitUrl: string }
-  | { merged: false; issue: number; stop: Stop };
+  | { merged: false; issue: number; stop: Stop }
+  | { skipped: true; issue: number; reason: string };
 
 /** Steps 2–6 for one issue. Escalations are handled here; factory errors propagate. */
 async function processIssue(ctx: RunContext, issue: GhIssue): Promise<IssueOutcome> {
@@ -132,6 +133,14 @@ async function processIssue(ctx: RunContext, issue: GhIssue): Promise<IssueOutco
   };
   try {
     const found = await findStep(ctx, issue);
+    if ('skip' in found) {
+      ctx.log.write({
+        issue: n, step: 'find', check: 'skip',
+        reason: `not a factory bug report: ${found.reason}`,
+        evidence: { reason: found.reason },
+      });
+      return { skipped: true, issue: n, reason: found.reason };
+    }
     if (!found.ok) return await toHuman(found.stop);
     const report = found.value.report;
 
@@ -165,13 +174,13 @@ async function processIssue(ctx: RunContext, issue: GhIssue): Promise<IssueOutco
 async function runFactory(opts: RunOptions): Promise<number> {
   const ctx = await setup(opts);
   const skip = new Set<string>([LABELS.inProgress, LABELS.resolved, LABELS.needsHuman]);
-  const open = await ctx.gh.listOpenFactoryIssues();
+  const open = await ctx.gh.listOpenIssues();
   const candidates = open
     .filter((i) => !i.labels.some((l) => skip.has(l.name)))
     .filter((i) => opts.issue === undefined || i.number === opts.issue);
   ctx.log.write({
     step: 'find', check: 'candidates',
-    reason: `${candidates.length} of ${open.length} open factory issues to process`,
+    reason: `${candidates.length} of ${open.length} open issues to process`,
     evidence: { open: open.map((i) => i.number), candidates: candidates.map((i) => i.number) },
   });
 
@@ -179,12 +188,21 @@ async function runFactory(opts: RunOptions): Promise<number> {
   if (candidates.length > 0) await ctx.gh.ensureLabels();
 
   const toHuman: Extract<IssueOutcome, { merged: false }>[] = [];
+  let skipped = 0;
   for (const issue of candidates) {
     const outcome = await processIssue(ctx, issue);
+    if ('skipped' in outcome) {
+      skipped++;
+      continue;
+    }
     if (outcome.merged) {
       ctx.log.write({
         step: 'run', reason: `merged #${outcome.issue}`,
-        evidence: { merged: { issue: outcome.issue, commitUrl: outcome.commitUrl }, needsHuman: toHuman.map(summaryOf) },
+        evidence: {
+          merged: { issue: outcome.issue, commitUrl: outcome.commitUrl },
+          needsHuman: toHuman.map(summaryOf),
+          skipped,
+        },
       });
       ctx.log.say(`\nMerged #${outcome.issue}: ${outcome.commitUrl}`);
       printHanded(ctx, toHuman);
@@ -192,11 +210,19 @@ async function runFactory(opts: RunOptions): Promise<number> {
     }
     toHuman.push(outcome);
   }
+  const tried = candidates.length - skipped;
   ctx.log.write({
-    step: 'run', reason: candidates.length ? 'nothing merged; all issues went to a human' : 'no open issues to process',
-    evidence: { merged: null, needsHuman: toHuman.map(summaryOf) },
+    step: 'run',
+    reason: !candidates.length ? 'no open issues to process'
+      : !tried ? 'no structured bug reports among open issues'
+      : 'nothing merged; all structured issues went to a human',
+    evidence: { merged: null, needsHuman: toHuman.map(summaryOf), skipped },
   });
-  ctx.log.say(candidates.length ? '\nNothing merged.' : '\nNo open factory issues to process.');
+  ctx.log.say(
+    !candidates.length ? '\nNo open issues to process.'
+      : !tried ? '\nNo structured bug reports among open issues.'
+      : '\nNothing merged.',
+  );
   printHanded(ctx, toHuman);
   return 3;
 }

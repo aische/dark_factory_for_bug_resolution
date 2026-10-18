@@ -8,7 +8,7 @@ Each run merges at most one issue.
 $ factory run --repo acme/shop
       setup            acme/shop base aeae53c on main, fixer omp (deepseek/deepseek-v4-pro), llm deepseek/deepseek-v4-pro
       setup.suite      PASS    31 tests green on base
-      find.candidates  8 of 8 open factory issues to process
+      find.candidates  8 of 8 open issues to process
 #1    find.form        FAIL    Input is not JSON
 #2    find.triage      PASS    trivial: off-by-one comparison
 #2    test.checks      PASS    fails 3/3 on base with an assertion
@@ -148,7 +148,7 @@ npm run dev -- run --repo acme/shop --dry-run
 
 ## Writing issues the factory can take
 
-Issues need the `factory` label and a body in the issue form's rendered format: one `### <Label>` heading per field.
+Issues need a body in the issue form's rendered format: one `### <Label>` heading per field. The factory looks at every open issue (oldest first); bodies that are not a structured bug report are skipped without commenting.
 
 ````markdown
 ### Component
@@ -176,7 +176,7 @@ An order of exactly 50.00 to Germany should ship free.
 - **Expected** and **Actual** must be JSON scalars. Strings need quotes: `"SAVE10"`, not `SAVE10`.
 - An empty field (`_No response_`), or Expected equal to Actual, sends the issue to a human.
 
-The factory skips issues that already carry `factory:in-progress`, `factory:resolved` or `factory:needs-human`. To retry an issue after a human has looked at it, remove `factory:needs-human`.
+The factory skips issues that already carry `factory:in-progress`, `factory:resolved` or `factory:needs-human`. To retry an issue after a human has looked at it, remove `factory:needs-human`. The optional `factory` label is no longer required for intake.
 
 The target repo needs a green suite on the base commit and application code under `src/`. Language is chosen by `tests.language` in the policy (`auto` by default):
 

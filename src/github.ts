@@ -31,9 +31,10 @@ export class GitHub {
     return `https://github.com/${this.repo}${path}`;
   }
 
-  async listOpenFactoryIssues(): Promise<GhIssue[]> {
+  /** All open issues, oldest first. Intake no longer requires the `factory` label. */
+  async listOpenIssues(): Promise<GhIssue[]> {
     const out = await runOk('gh', [
-      'issue', 'list', '--repo', this.repo, '--label', LABELS.factory, '--state', 'open',
+      'issue', 'list', '--repo', this.repo, '--state', 'open',
       '--json', 'number,title,body,labels,createdAt', '--limit', '200',
     ]);
     const issues = JSON.parse(out) as GhIssue[];
@@ -41,6 +42,7 @@ export class GitHub {
   }
 
   async ensureLabels(): Promise<void> {
+    // Status labels are required; `factory` remains available for humans who want to opt in explicitly.
     for (const name of Object.values(LABELS)) {
       await this.write(undefined, 'label', ['label', 'create', name, '--force', '--repo', this.repo]);
     }
